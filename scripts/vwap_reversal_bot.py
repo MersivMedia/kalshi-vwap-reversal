@@ -138,8 +138,15 @@ MIN_PROFIT_MARGIN = cfg.fee_hurdle_min_profit_pct
 # === Safety Gates (from config) ===
 SPREAD_CORRIDOR_MAX_PCT = cfg.spread_corridor_max_pct
 ADX_PERIOD = cfg.adx_period
-ADX_TREND_THRESHOLD = cfg.adx_trend_threshold
+ADX_TREND_THRESHOLD = cfg.adx_trend_threshold  # Default fallback
 ADX_COOLDOWN_THRESHOLD = cfg.adx_cooldown_threshold
+
+# Per-asset ADX thresholds (from config)
+ADX_THRESHOLDS = {sym: asset.adx_threshold for sym, asset in cfg.assets.items() if asset.enabled}
+
+def get_adx_threshold(symbol: str) -> float:
+    """Get the ADX threshold for a specific asset."""
+    return ADX_THRESHOLDS.get(symbol, ADX_TREND_THRESHOLD)
 OBI_MIN_THRESHOLD = cfg.obi_min_threshold
 OBI_DEPTH_LEVELS = cfg.obi_depth_levels
 MAX_DATA_LAG_SECONDS = cfg.data_freshness_max_lag_seconds
@@ -246,22 +253,26 @@ def check_adx_hysteresis(symbol: str) -> Tuple[bool, str]:
     adx = state.adx_states[symbol].get_adx()
     is_blocked = state.adx_trend_blocked.get(symbol, False)
     
+    # Get per-asset ADX threshold
+    threshold = get_adx_threshold(symbol)
+    cooldown = ADX_COOLDOWN_THRESHOLD
+    
     if is_blocked:
-        # Currently blocked - need ADX to cool down below 22 to unblock
-        if adx < ADX_COOLDOWN_THRESHOLD:
+        # Currently blocked - need ADX to cool down below cooldown threshold to unblock
+        if adx < cooldown:
             state.adx_trend_blocked[symbol] = False
             log(f"🔄 {symbol} ADX cooled to {adx:.1f} - mean-reversion unlocked")
-            return (True, f"ADX cooled: {adx:.1f} < {ADX_COOLDOWN_THRESHOLD}")
+            return (True, f"ADX cooled: {adx:.1f} < {cooldown}")
         else:
-            return (False, f"ADX still trending: {adx:.1f} (needs < {ADX_COOLDOWN_THRESHOLD} to unlock)")
+            return (False, f"ADX still trending: {adx:.1f} (needs < {cooldown} to unlock)")
     else:
-        # Not blocked - check if we should block
-        if adx >= ADX_TREND_THRESHOLD:
+        # Not blocked - check if we should block (using per-asset threshold)
+        if adx >= threshold:
             state.adx_trend_blocked[symbol] = True
-            log(f"🚫 {symbol} ADX trending at {adx:.1f} - mean-reversion blocked")
-            return (False, f"ADX trending: {adx:.1f} >= {ADX_TREND_THRESHOLD}")
+            log(f"🚫 {symbol} ADX trending at {adx:.1f} - mean-reversion blocked (threshold: {threshold})")
+            return (False, f"ADX trending: {adx:.1f} >= {threshold}")
         else:
-            return (True, f"ADX ranging: {adx:.1f}")
+            return (True, f"ADX ranging: {adx:.1f} < {threshold}")
 
 
 async def calculate_obi(client, ticker: str) -> float:

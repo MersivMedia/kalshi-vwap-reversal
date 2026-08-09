@@ -7,14 +7,16 @@
             "coinbase_symbol": "NEAR-USD",
             "enabled": true,
             "size_multiplier": 1.0,
-            "contract_size": 0.1
+            "contract_size": 0.1,
+            "adx_threshold": 25
         },
         "SUI": {
             "kalshi_ticker": "KXSUIPERP", 
             "coinbase_symbol": "SUI-USD",
             "enabled": true,
             "size_multiplier": 1.0,
-            "contract_size": 0.1
+            "contract_size": 0.1,
+            "adx_threshold": 35
         },
         "BTC": {
             "kalshi_ticker": "KXBTCPERP",
@@ -66,7 +68,7 @@
     },
     
     "risk": {
-        "max_risk_per_trade_pct": 0.10,
+        "max_risk_per_trade_pct": 0.20,
         "max_margin_pct": 0.30,
         "use_isolated_margin": true,
         "max_leverage": 5,

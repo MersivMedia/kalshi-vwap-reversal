@@ -22,6 +22,7 @@ class AssetConfig:
     enabled: bool = True
     size_multiplier: float = 1.0
     contract_size: float = 0.0001  # 1 contract = this many units (BTC: 0.0001, ETH: 0.001)
+    adx_threshold: float = 25  # Per-asset ADX threshold (default 25)
 
 
 @dataclass
@@ -116,7 +117,8 @@ def load_config(config_path: str = None) -> Config:
                 coinbase_symbol=asset_data.get('coinbase_symbol', f'{symbol}-USD'),
                 enabled=asset_data.get('enabled', True),
                 size_multiplier=asset_data.get('size_multiplier', 1.0),
-                contract_size=asset_data.get('contract_size', default_contract_sizes.get(symbol, 0.0001))
+                contract_size=asset_data.get('contract_size', default_contract_sizes.get(symbol, 0.0001)),
+                adx_threshold=asset_data.get('adx_threshold', 25)
             )
         
         # VWAP
