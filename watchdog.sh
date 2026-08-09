@@ -2,6 +2,7 @@
 #
 # VWAP Bot Watchdog
 # Ensures the bot is running, restarts if crashed
+# DOES NOT restart if circuit breaker was triggered
 #
 # Add to crontab:
 #   * * * * * /home/clawdbot/clawd/projects/kalshi-vwap-reversal/watchdog.sh >> /home/clawdbot/clawd/projects/kalshi-vwap-reversal/logs/watchdog.log 2>&1
@@ -11,8 +12,26 @@ BOT_DIR="/home/clawdbot/clawd/projects/kalshi-vwap-reversal"
 BOT_SCRIPT="scripts/vwap_reversal_bot.py"
 PID_FILE="$BOT_DIR/bot.pid"
 LOG_FILE="$BOT_DIR/bot.log"
+CIRCUIT_BREAKER_FILE="$BOT_DIR/state/circuit_breaker.json"
 
 cd "$BOT_DIR" || exit 1
+
+# Check if circuit breaker is tripped
+if [ -f "$CIRCUIT_BREAKER_FILE" ]; then
+    # Parse JSON to check if tripped
+    TRIPPED=$(python3 -c "import json; print(json.load(open('$CIRCUIT_BREAKER_FILE')).get('tripped', False))" 2>/dev/null)
+    
+    if [ "$TRIPPED" = "True" ]; then
+        REASON=$(python3 -c "import json; print(json.load(open('$CIRCUIT_BREAKER_FILE')).get('reason', 'unknown'))" 2>/dev/null)
+        TRIPPED_AT=$(python3 -c "import json; print(json.load(open('$CIRCUIT_BREAKER_FILE')).get('tripped_at_iso', 'unknown'))" 2>/dev/null)
+        
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 🚨 CIRCUIT BREAKER TRIPPED - NOT restarting"
+        echo "    Reason: $REASON"
+        echo "    Tripped at: $TRIPPED_AT"
+        echo "    To reset: rm $CIRCUIT_BREAKER_FILE"
+        exit 0
+    fi
+fi
 
 # Check if bot is running
 if pgrep -f "vwap_reversal_bot.py" > /dev/null; then

@@ -586,6 +586,7 @@ def check_circuit_breaker() -> Tuple[bool, str]:
     """
     Gate 5: Circuit breaker - halt trading after consecutive losses.
     Prevents catastrophic drawdown during adverse conditions.
+    Saves state to disk so watchdog won't restart the bot.
     """
     global circuit_breaker_tripped
     
@@ -595,6 +596,11 @@ def check_circuit_breaker() -> Tuple[bool, str]:
     if consecutive_losses >= CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
         circuit_breaker_tripped = True
         log(f"🚨 CIRCUIT BREAKER TRIPPED: {consecutive_losses} consecutive stop-losses!")
+        
+        # Save to disk so watchdog knows not to restart
+        from state_manager import save_circuit_breaker
+        save_circuit_breaker(consecutive_losses)
+        
         return (False, f"Circuit breaker triggered: {consecutive_losses} consecutive losses")
     
     return (True, f"Circuit breaker OK ({consecutive_losses} consecutive losses)")
