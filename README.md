@@ -1,4 +1,4 @@
-# Kalshi Perps VWAP Reversal Bot v2.7.1
+# Kalshi Perps VWAP Reversal Bot v2.7.2
 
 Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow confirmation, and multi-layer safety gates.
 
@@ -13,6 +13,11 @@ Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow
          -2σ ───────────────────────  Entry zone for longs
          -3σ ═══════════════════════  EXTREME OVERSOLD (long zone)
 ```
+
+**v2.7.2 Fixes:**
+- Fixed `state` variable shadowing in log_comprehensive_status
+- Fixed CVD method name (`get_cvd_at_time`, not `get_cvd_at`)
+- seed_vwap_from_history now uses config-driven products
 
 **v2.7.1 Fixes:**
 - Fixed BotState field names (sed rename accident)
