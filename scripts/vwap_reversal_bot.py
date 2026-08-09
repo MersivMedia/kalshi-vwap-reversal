@@ -1234,16 +1234,21 @@ async def manage_positions(client: KalshiClient):
         if ticker not in live_tickers:
             targets = state.exit_targets[ticker]
             
-            # If exit was pending, now we can confirm it and book PnL
-            if targets.get('exit_pending') and targets.get('exit_pnl') is not None:
+            # If exit was pending, now we can confirm it and calculate realized PnL
+            if targets.get('exit_pending') and targets.get('balance_before_exit') is not None:
                 symbol = targets.get('symbol', ticker)
-                pnl = targets['exit_pnl']
+                balance_before = targets['balance_before_exit']
                 exit_reason = targets.get('exit_reason', 'unknown')
                 side = targets.get('side', 'unknown')
                 exit_price = targets.get('exit_price', 0)
                 
+                # Get current balance to calculate REALIZED PnL
+                balance_after = await run_sync(client.get_balance)
+                pnl = balance_after - balance_before
+                
                 log(f"[POSITION] Exit confirmed for {symbol}")
-                log(f"  PnL: ${pnl:+,.2f}")
+                log(f"  Balance: ${balance_before:,.2f} → ${balance_after:,.2f}")
+                log(f"  Realized PnL: ${pnl:+,.2f}")
                 
                 # === NOW book PnL ===
                 state.total_pnl += pnl
@@ -1274,7 +1279,9 @@ async def manage_positions(client: KalshiClient):
                     'symbol': symbol,
                     'reason': exit_reason,
                     'exit_price': exit_price,
-                    'pnl': pnl,
+                    'balance_before': balance_before,
+                    'balance_after': balance_after,
+                    'realized_pnl': pnl,
                     'consecutive_losses': state.consecutive_losses,
                     'is_stop_loss': is_stop_loss
                 })
@@ -1391,6 +1398,9 @@ async def manage_positions(client: KalshiClient):
                 # Don't delete state.exit_targets in dry run so we can keep tracking
                 continue
             
+            # Capture balance BEFORE exit for realized PnL calculation
+            balance_before_exit = await run_sync(client.get_balance)
+            
             # Place exit order (async to avoid blocking)
             exit_side = 'sell' if side == 'long' else 'buy'
             result = await run_sync(
@@ -1403,16 +1413,13 @@ async def manage_positions(client: KalshiClient):
             )
             
             if result.get('order') or result.get('order_id'):
-                # Use Kalshi's actual unrealized PnL (based on real entry fills)
-                pnl = kalshi_unrealized_pnl
-                
                 log(f"  Exit order placed for {contracts} contracts")
-                log(f"  Actual PnL: ${pnl:+,.2f} (from Kalshi, will book when position closes)")
+                log(f"  Balance before exit: ${balance_before_exit:,.2f} (will calc realized PnL after close)")
                 
-                # Store exit info on targets - will be booked when position confirmed closed
+                # Store exit info on targets - will calc realized PnL when position confirmed closed
                 state.exit_targets[ticker]['exit_pending'] = True
                 state.exit_targets[ticker]['exit_order_time'] = time.time()
-                state.exit_targets[ticker]['exit_pnl'] = pnl
+                state.exit_targets[ticker]['balance_before_exit'] = balance_before_exit
                 state.exit_targets[ticker]['exit_reason'] = exit_reason
                 state.exit_targets[ticker]['exit_price'] = current_price
                 state.exit_targets[ticker]['symbol'] = symbol
@@ -1423,7 +1430,7 @@ async def manage_positions(client: KalshiClient):
                     'reason': exit_reason,
                     'exit_price': current_price,
                     'contracts': contracts,
-                    'actual_pnl': pnl  # From Kalshi unrealized_pnl
+                    'balance_before': balance_before_exit
                 })
             else:
                 log(f"  ❌ Exit failed: {result}")
