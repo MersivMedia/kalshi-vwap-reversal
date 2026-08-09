@@ -478,6 +478,60 @@ def log_data(data: dict):
 # WEBSOCKET HANDLERS
 # ============================================================
 
+# Watchdog settings
+WS_HEARTBEAT_TIMEOUT = 60  # Force reconnect if no message in 60 seconds
+WS_WATCHDOG_INTERVAL = 30  # Check every 30 seconds
+
+# Global reference to WebSocket tasks for watchdog to restart them
+ws_tasks = {}
+
+
+async def ws_watchdog():
+    """Monitor WebSocket connections and force reconnect on silent disconnect."""
+    while True:
+        try:
+            await asyncio.sleep(WS_WATCHDOG_INTERVAL)
+            now = time.time()
+            
+            # Check Kalshi WebSocket
+            kalshi_last = state.ws_last_message.get('kalshi', 0)
+            kalshi_age = now - kalshi_last if kalshi_last > 0 else 0
+            
+            if kalshi_last > 0 and kalshi_age > WS_HEARTBEAT_TIMEOUT:
+                log(f"[WATCHDOG] Kalshi WS stale ({kalshi_age:.0f}s), forcing reconnect...")
+                if 'kalshi' in ws_tasks and not ws_tasks['kalshi'].done():
+                    ws_tasks['kalshi'].cancel()
+                    try:
+                        await ws_tasks['kalshi']
+                    except asyncio.CancelledError:
+                        pass
+                # Restart the task
+                ws_tasks['kalshi'] = asyncio.create_task(kalshi_websocket(), name="kalshi_ws")
+                state.ws_last_message['kalshi'] = now  # Reset to avoid immediate re-trigger
+            
+            # Check Coinbase WebSocket  
+            coinbase_last = state.ws_last_message.get('coinbase', 0)
+            coinbase_age = now - coinbase_last if coinbase_last > 0 else 0
+            
+            if coinbase_last > 0 and coinbase_age > WS_HEARTBEAT_TIMEOUT:
+                log(f"[WATCHDOG] Coinbase WS stale ({coinbase_age:.0f}s), forcing reconnect...")
+                if 'coinbase' in ws_tasks and not ws_tasks['coinbase'].done():
+                    ws_tasks['coinbase'].cancel()
+                    try:
+                        await ws_tasks['coinbase']
+                    except asyncio.CancelledError:
+                        pass
+                # Restart the task
+                ws_tasks['coinbase'] = asyncio.create_task(coinbase_websocket(), name="coinbase_ws")
+                state.ws_last_message['coinbase'] = now
+                
+        except asyncio.CancelledError:
+            log("[WATCHDOG] Shutting down...")
+            break
+        except Exception as e:
+            log(f"[WATCHDOG] Error: {e}")
+
+
 async def kalshi_websocket():
     """Kalshi WebSocket for real-time perp data with exponential backoff."""
     
@@ -1833,10 +1887,16 @@ async def main():
     sync_positions_on_startup(client)
     
     # Create tasks for concurrent execution
+    # Store WS tasks in global dict so watchdog can restart them
+    global ws_tasks
+    ws_tasks['kalshi'] = asyncio.create_task(kalshi_websocket(), name="kalshi_ws")
+    ws_tasks['coinbase'] = asyncio.create_task(coinbase_websocket(), name="coinbase_ws")
+    
     tasks = [
-        asyncio.create_task(kalshi_websocket(), name="kalshi_ws"),
-        asyncio.create_task(coinbase_websocket(), name="coinbase_ws"),
+        ws_tasks['kalshi'],
+        ws_tasks['coinbase'],
         asyncio.create_task(trading_loop(client), name="trading_loop"),
+        asyncio.create_task(ws_watchdog(), name="ws_watchdog"),
     ]
     
     # Set up signal handlers for graceful shutdown
