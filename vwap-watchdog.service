@@ -1,0 +1,17 @@
+[Unit]
+Description=VWAP Bot Position Watchdog
+After=network.target
+
+[Service]
+Type=simple
+User=clawdbot
+WorkingDirectory=/home/clawdbot/clawd/projects/kalshi-vwap-reversal
+ExecStart=/usr/bin/python3 scripts/position_watchdog.py --interval 30
+Restart=always
+RestartSec=10
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

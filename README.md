@@ -1,4 +1,4 @@
-# Kalshi Perps VWAP Reversal Bot v2.6
+# Kalshi Perps VWAP Reversal Bot v2.7
 
 Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow confirmation, and multi-layer safety gates.
 
@@ -13,6 +13,14 @@ Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow
          -2σ ───────────────────────  Entry zone for longs
          -3σ ═══════════════════════  EXTREME OVERSOLD (long zone)
 ```
+
+**v2.7 Changes:**
+- **BotState dataclass** — All mutable state encapsulated in `BotState` class for testability
+- **Position watchdog** — `position_watchdog.py` monitors positions independently for emergency exits
+- **CVD strictness config** — New `cvd_strict_divergence` and `cvd_min_delta_pct` config options
+- **Coinbase-only price history** — Swing detection uses only Coinbase data (no venue mixing)
+- **Graceful shutdown** — Signal handlers save state and cancel tasks cleanly
+- **Removed dead code** — Unused `detect_price_extreme` function removed
 
 **v2.6 Changes:**
 - **Non-blocking async I/O** — All Kalshi API calls now run in thread pool, event loop no longer blocked
@@ -220,6 +228,35 @@ sudo systemctl status vwap-bot
 ```
 
 Service respects circuit breaker — won't start if tripped.
+
+## Position Watchdog
+
+Independent safety monitor that provides second-layer exit protection:
+
+```bash
+# Run watchdog continuously
+python scripts/position_watchdog.py
+
+# Single check (for cron)
+python scripts/position_watchdog.py --once
+
+# Dry run (check without placing orders)
+python scripts/position_watchdog.py --dry-run
+```
+
+**What it monitors:**
+- Positions exceeding 5% loss → emergency exit
+- Main bot heartbeat → exits if bot appears dead
+- Stop loss levels from bot state → enforces exits if bot missed them
+
+**Install as service:**
+```bash
+sudo cp vwap-watchdog.service /etc/systemd/system/
+sudo systemctl enable vwap-watchdog
+sudo systemctl start vwap-watchdog
+```
+
+Run both `vwap-bot` and `vwap-watchdog` for redundant exit protection.
 
 ## License
 

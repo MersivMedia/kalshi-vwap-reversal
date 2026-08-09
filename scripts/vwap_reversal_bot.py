@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kalshi Perps VWAP Reversal Bot v2.6
+Kalshi Perps VWAP Reversal Bot v2.7
 
 Strategy:
 - VWAP with configurable σ bands (default ±2σ)
@@ -159,12 +159,9 @@ LOG_DIR.mkdir(exist_ok=True)
 
 # Status logging interval
 STATUS_LOG_INTERVAL = 30  # seconds
-last_status_log = 0
 
 # State persistence
 STATE_SAVE_INTERVAL = 60  # Save state every 60 seconds
-last_state_save = 0
-total_pnl = 0.0
 
 # ============================================================
 # ASYNC HELPERS
@@ -196,11 +193,11 @@ def check_data_freshness() -> Tuple[bool, str]:
     """
     current_time = time.time()
     
-    cb_lag = current_time - ws_last_message.get('coinbase', 0)
-    kalshi_lag = current_time - ws_last_message.get('kalshi', 0)
+    cb_lag = current_time - state.ws_last_message.get('coinbase', 0)
+    kalshi_lag = current_time - state.ws_last_message.get('kalshi', 0)
     
     # If we've never received a message, allow (startup grace period)
-    if ws_last_message.get('coinbase', 0) == 0 or ws_last_message.get('kalshi', 0) == 0:
+    if state.ws_last_message.get('coinbase', 0) == 0 or state.ws_last_message.get('kalshi', 0) == 0:
         return (True, "Startup grace period")
     
     if cb_lag > MAX_DATA_LAG_SECONDS:
@@ -219,8 +216,8 @@ def check_spread_corridor(symbol: str) -> Tuple[bool, float]:
     
     If divergence > SPREAD_CORRIDOR_MAX_PCT, trading should halt.
     """
-    kalshi_price = kalshi_prices.get(symbol, 0)
-    coinbase_price = coinbase_prices.get(symbol, 0)
+    kalshi_price = state.kalshi_prices.get(symbol, 0)
+    coinbase_price = state.coinbase_prices.get(symbol, 0)
     
     if kalshi_price == 0 or coinbase_price == 0:
         return (True, 0.0)  # Can't check, allow trading
@@ -240,18 +237,17 @@ def check_adx_hysteresis(symbol: str) -> Tuple[bool, str]:
     
     This prevents rapid on/off switching at the threshold boundary.
     """
-    global adx_trend_blocked
     
-    if symbol not in adx_states or not adx_states[symbol].is_valid():
+    if symbol not in state.adx_states or not state.adx_states[symbol].is_valid():
         return (True, "ADX not ready")
     
-    adx = adx_states[symbol].get_adx()
-    is_blocked = adx_trend_blocked.get(symbol, False)
+    adx = state.adx_states[symbol].get_adx()
+    is_blocked = state.adx_trend_blocked.get(symbol, False)
     
     if is_blocked:
         # Currently blocked - need ADX to cool down below 22 to unblock
         if adx < ADX_COOLDOWN_THRESHOLD:
-            adx_trend_blocked[symbol] = False
+            state.adx_trend_blocked[symbol] = False
             log(f"🔄 {symbol} ADX cooled to {adx:.1f} - mean-reversion unlocked")
             return (True, f"ADX cooled: {adx:.1f} < {ADX_COOLDOWN_THRESHOLD}")
         else:
@@ -259,7 +255,7 @@ def check_adx_hysteresis(symbol: str) -> Tuple[bool, str]:
     else:
         # Not blocked - check if we should block
         if adx >= ADX_TREND_THRESHOLD:
-            adx_trend_blocked[symbol] = True
+            state.adx_trend_blocked[symbol] = True
             log(f"🚫 {symbol} ADX trending at {adx:.1f} - mean-reversion blocked")
             return (False, f"ADX trending: {adx:.1f} >= {ADX_TREND_THRESHOLD}")
         else:
@@ -307,25 +303,24 @@ def check_circuit_breaker() -> Tuple[bool, str]:
     Prevents catastrophic drawdown during adverse conditions.
     Saves state to disk so watchdog won't restart the bot.
     """
-    global circuit_breaker_tripped
     
-    if circuit_breaker_tripped:
-        return (False, f"Circuit breaker TRIPPED: {consecutive_losses} consecutive losses")
+    if state.circuit_breaker_tripped:
+        return (False, f"Circuit breaker TRIPPED: {state.consecutive_losses} consecutive losses")
     
-    if consecutive_losses >= CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
-        circuit_breaker_tripped = True
-        log(f"🚨 CIRCUIT BREAKER TRIPPED: {consecutive_losses} consecutive stop-losses!")
+    if state.consecutive_losses >= CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
+        state.circuit_breaker_tripped = True
+        log(f"🚨 CIRCUIT BREAKER TRIPPED: {state.consecutive_losses} consecutive stop-losses!")
         
         # Save to disk so watchdog knows not to restart
         from state_manager import save_circuit_breaker
-        save_circuit_breaker(consecutive_losses)
+        save_circuit_breaker(state.consecutive_losses)
         
         # Send Telegram alert
-        notify_circuit_breaker(consecutive_losses)
+        notify_circuit_breaker(state.consecutive_losses)
         
-        return (False, f"Circuit breaker triggered: {consecutive_losses} consecutive losses")
+        return (False, f"Circuit breaker triggered: {state.consecutive_losses} consecutive losses")
     
-    return (True, f"Circuit breaker OK ({consecutive_losses} consecutive losses)")
+    return (True, f"Circuit breaker OK ({state.consecutive_losses} consecutive losses)")
 
 
 async def validate_entry_gates(client, symbol: str, side: str, entry_price: float, target_price: float) -> Tuple[bool, str]:
@@ -341,7 +336,6 @@ async def validate_entry_gates(client, symbol: str, side: str, entry_price: floa
     4. OBI confirmation (orderbook supports direction)
     5. Circuit breaker (consecutive losses)
     """
-    global trading_halted, halt_reason
     
     ticker = PERP_TICKERS[symbol]
     
@@ -365,12 +359,12 @@ async def validate_entry_gates(client, symbol: str, side: str, entry_price: floa
     # Gate 2: Spread Corridor
     is_safe, divergence = check_spread_corridor(symbol)
     if not is_safe:
-        trading_halted = True
-        halt_reason = f"{symbol} spread corridor breach: {divergence*100:.3f}%"
+        state.trading_halted = True
+        state.halt_reason = f"{symbol} spread corridor breach: {divergence*100:.3f}%"
         return (False, f"Spread corridor: {divergence*100:.3f}% > {SPREAD_CORRIDOR_MAX_PCT*100:.2f}% max")
     else:
-        trading_halted = False
-        halt_reason = ""
+        state.trading_halted = False
+        state.halt_reason = ""
     
     # Gate 3: ADX Trend Filter with Hysteresis
     adx_ok, adx_info = check_adx_hysteresis(symbol)
@@ -386,51 +380,70 @@ async def validate_entry_gates(client, symbol: str, side: str, entry_price: floa
         return (False, f"OBI unsupportive for short: {obi:+.2f} > -{OBI_MIN_THRESHOLD}")
     
     # All gates passed
-    adx_value = adx_states[symbol].get_adx() if symbol in adx_states and adx_states[symbol].is_valid() else 0.0
+    adx_value = state.adx_states[symbol].get_adx() if symbol in state.adx_states and state.adx_states[symbol].is_valid() else 0.0
     return (True, f"All gates passed (OBI: {obi:+.2f}, ADX: {adx_value:.1f})")
 
 
 # ============================================================
 # GLOBAL STATE
 # ============================================================
+# BOT STATE - All mutable state in one place for testability
+# ============================================================
 
-ws_connected = {'kalshi': False, 'coinbase': False}
-ws_last_message = {'kalshi': 0.0, 'coinbase': 0.0}
+@dataclass
+class BotState:
+    """Encapsulates all mutable bot state for cleaner testing and lifecycle."""
+    
+    # WebSocket connection state
+    state.ws_connected: Dict[str, bool] = field(default_factory=lambda: {'kalshi': False, 'coinbase': False})
+    state.ws_last_message: Dict[str, float] = field(default_factory=lambda: {'kalshi': 0.0, 'coinbase': 0.0})
+    
+    # Per-symbol indicator state
+    state.vwap_states: Dict[str, VWAPState] = field(default_factory=dict)
+    state.cvd_states: Dict[str, CVDState] = field(default_factory=dict)
+    state.adx_states: Dict[str, ADXState] = field(default_factory=dict)
+    
+    # Price history - COINBASE ONLY for swing detection (clean data source)
+    state.coinbase_price_history: Dict[str, deque] = field(default_factory=dict)
+    
+    # Cross-venue price tracking for spread corridor
+    state.kalshi_prices: Dict[str, float] = field(default_factory=dict)
+    state.coinbase_prices: Dict[str, float] = field(default_factory=dict)
+    
+    # Trading halt state
+    state.trading_halted: bool = False
+    state.halt_reason: str = ""
+    
+    # ADX Hysteresis state (prevents flapping at threshold boundary)
+    state.adx_trend_blocked: Dict[str, bool] = field(default_factory=dict)
+    
+    # Circuit breaker state
+    state.consecutive_losses: int = 0
+    state.circuit_breaker_tripped: bool = False
+    
+    # Exit targets - stored locally for each position (by ticker)
+    state.exit_targets: Dict[str, dict] = field(default_factory=dict)
+    
+    # Pending orders - track unfilled orders
+    state.pending_orders: Dict[str, dict] = field(default_factory=dict)
+    
+    # Rate limiting
+    state.trades_this_hour: int = 0
+    state.last_hour: int = field(default_factory=lambda: datetime.now().hour)
+    
+    # Session PnL tracking
+    state.total_pnl: float = 0.0
+    
+    # Status logging
+    state.last_status_log: float = 0.0
+    state.last_state_save: float = 0.0
 
-# Per-symbol state
-vwap_states: Dict[str, VWAPState] = {}
-cvd_states: Dict[str, CVDState] = {}
-adx_states: Dict[str, 'ADXState'] = {}  # ADX trend filter
-price_history: Dict[str, deque] = {}  # For high/low detection (Coinbase)
 
-# Cross-venue price tracking for spread corridor
-kalshi_prices: Dict[str, float] = {}   # Latest Kalshi mid prices
-coinbase_prices: Dict[str, float] = {} # Latest Coinbase spot prices
+# Global bot state instance
+state = BotState()
 
-# Trading halted flag (spread corridor breach)
-trading_halted: bool = False
-halt_reason: str = ""
-
-# ADX Hysteresis state (prevents flapping at threshold boundary)
-adx_trend_blocked: Dict[str, bool] = {}  # Per-symbol trend block state
-
-# Circuit breaker state
-consecutive_losses: int = 0
-circuit_breaker_tripped: bool = False
-
-# Exit targets - stored locally for each position (by ticker)
-# Format: {ticker: {'stop_loss': float, 'target_price': float, 'side': str, 'entry_price': float}}
-exit_targets: Dict[str, dict] = {}
-
-# Pending orders - track unfilled orders
-pending_orders: Dict[str, dict] = {}
-
-# Stale order threshold - cancel if price moved more than this from order
+# Constants (not state)
 STALE_ORDER_PRICE_THRESHOLD = 0.005  # 0.5% price deviation = cancel order
-
-# Rate limiting
-trades_this_hour = 0
-last_hour = datetime.now().hour
 
 # ============================================================
 # LOGGING
@@ -465,7 +478,6 @@ def log_data(data: dict):
 
 async def kalshi_websocket():
     """Kalshi WebSocket for real-time perp data with exponential backoff."""
-    global ws_connected
     
     reconnect_delay = 1.0  # Start with 1 second
     max_delay = 60.0  # Cap at 60 seconds
@@ -495,7 +507,7 @@ async def kalshi_websocket():
             
             log("[KALSHI WS] Connecting...")
             async with websockets.connect(KALSHI_WS_URL, extra_headers=headers, ping_interval=20, ping_timeout=10) as ws:
-                ws_connected['kalshi'] = True
+                state.ws_connected['kalshi'] = True
                 reconnect_delay = 1.0  # Reset on successful connection
                 log("[KALSHI WS] Connected!")
                 
@@ -521,7 +533,7 @@ async def kalshi_websocket():
             log("[KALSHI WS] Cancelled, shutting down...")
             break
         except Exception as e:
-            ws_connected['kalshi'] = False
+            state.ws_connected['kalshi'] = False
             log(f"[KALSHI WS] Error: {e}, reconnecting in {reconnect_delay:.1f}s...")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)  # Exponential backoff
@@ -529,7 +541,7 @@ async def kalshi_websocket():
 
 def handle_kalshi_message(data: dict):
     """Process Kalshi WebSocket message."""
-    ws_last_message['kalshi'] = time.time()
+    state.ws_last_message['kalshi'] = time.time()
     
     msg_type = data.get('type')
     
@@ -545,7 +557,7 @@ def handle_kalshi_message(data: dict):
             
             # Convert contract price to spot for spread corridor tracking
             spot_price = contract_to_spot_price(symbol, contract_price)
-            kalshi_prices[symbol] = spot_price
+            state.kalshi_prices[symbol] = spot_price
     
     elif msg_type == 'ticker':
         # Price update
@@ -555,18 +567,14 @@ def handle_kalshi_message(data: dict):
         if symbol:
             contract_price = float(data.get('msg', {}).get('last_price', 0))
             if contract_price > 0:
-                # Convert to spot price for spread corridor
+                # Convert to spot price for spread corridor only
+                # NOTE: Price history is Coinbase-only to avoid mixing venues
                 spot_price = contract_to_spot_price(symbol, contract_price)
-                kalshi_prices[symbol] = spot_price
-                
-                if symbol not in price_history:
-                    price_history[symbol] = deque(maxlen=100)
-                price_history[symbol].append({'time': time.time(), 'price': spot_price})
+                state.kalshi_prices[symbol] = spot_price
 
 
 async def coinbase_websocket():
     """Coinbase Advanced Trade WebSocket for live market data with exponential backoff."""
-    global ws_connected
     
     products = ['BTC-USD', 'ETH-USD']
     reconnect_delay = 1.0  # Start with 1 second
@@ -576,7 +584,7 @@ async def coinbase_websocket():
         try:
             log("[COINBASE WS] Connecting...")
             async with websockets.connect(COINBASE_WS_URL, ping_interval=20, ping_timeout=10) as ws:
-                ws_connected['coinbase'] = True
+                state.ws_connected['coinbase'] = True
                 reconnect_delay = 1.0  # Reset on successful connection
                 log("[COINBASE WS] Connected!")
                 
@@ -599,7 +607,7 @@ async def coinbase_websocket():
             log("[COINBASE WS] Cancelled, shutting down...")
             break
         except Exception as e:
-            ws_connected['coinbase'] = False
+            state.ws_connected['coinbase'] = False
             log(f"[COINBASE WS] Error: {e}, reconnecting in {reconnect_delay:.1f}s...")
             await asyncio.sleep(reconnect_delay)
             reconnect_delay = min(reconnect_delay * 2, max_delay)  # Exponential backoff
@@ -607,7 +615,7 @@ async def coinbase_websocket():
 
 def handle_coinbase_message(data: dict):
     """Process Coinbase Advanced Trade WebSocket message."""
-    ws_last_message['coinbase'] = time.time()
+    state.ws_last_message['coinbase'] = time.time()
     
     # Advanced Trade API format: market_trades channel
     if data.get('channel') == 'market_trades' and 'events' in data:
@@ -622,57 +630,41 @@ def handle_coinbase_message(data: dict):
                     side = trade.get('side', 'UNKNOWN')  # 'BUY' or 'SELL'
                     
                     # Track Coinbase spot price for spread corridor
-                    coinbase_prices[symbol] = price
+                    state.coinbase_prices[symbol] = price
                     
                     # Update VWAP (candle-based)
-                    if symbol not in vwap_states:
-                        vwap_states[symbol] = VWAPState()
+                    if symbol not in state.vwap_states:
+                        state.vwap_states[symbol] = VWAPState()
                     
                     # Track candle count before processing
-                    prev_candle_count = len(vwap_states[symbol].candles)
-                    vwap_states[symbol].process_trade(price, size, side)
-                    new_candle_count = len(vwap_states[symbol].candles)
+                    prev_candle_count = len(state.vwap_states[symbol].candles)
+                    state.vwap_states[symbol].process_trade(price, size, side)
+                    new_candle_count = len(state.vwap_states[symbol].candles)
                     
                     # Update CVD
-                    if symbol not in cvd_states:
-                        cvd_states[symbol] = CVDState()
-                    cvd_states[symbol].add_trade(price, size, side)
+                    if symbol not in state.cvd_states:
+                        state.cvd_states[symbol] = CVDState()
+                    state.cvd_states[symbol].add_trade(price, size, side)
                     
                     # Update ADX when a new candle completes
-                    if symbol not in adx_states:
-                        adx_states[symbol] = ADXState(period=ADX_PERIOD)
+                    if symbol not in state.adx_states:
+                        state.adx_states[symbol] = ADXState(period=ADX_PERIOD)
                     
                     # If a candle just completed, update ADX with it
-                    if new_candle_count > prev_candle_count and vwap_states[symbol].candles:
-                        completed = vwap_states[symbol].candles[-1]
-                        adx_states[symbol].add_candle(completed.high, completed.low, completed.close)
+                    if new_candle_count > prev_candle_count and state.vwap_states[symbol].candles:
+                        completed = state.vwap_states[symbol].candles[-1]
+                        state.adx_states[symbol].add_candle(completed.high, completed.low, completed.close)
                     
-                    # Update price history for swing detection
-                    if symbol not in price_history:
-                        price_history[symbol] = deque(maxlen=100)
-                    price_history[symbol].append({'time': time.time(), 'price': price})
+                    # Update Coinbase-only price history for swing detection
+                    if symbol not in state.coinbase_price_history:
+                        state.coinbase_price_history[symbol] = deque(maxlen=100)
+                    state.coinbase_price_history[symbol].append({'time': time.time(), 'price': price})
 
 # ============================================================
 # STRATEGY LOGIC
 # ============================================================
 
 # NOTE: No daily VWAP reset - we use a rolling window instead
-
-
-def detect_price_extreme(symbol: str) -> Tuple[bool, bool]:
-    """Detect if price just made a new high or low in recent window."""
-    if symbol not in price_history or len(price_history[symbol]) < 10:
-        return (False, False)
-    
-    prices = [p['price'] for p in price_history[symbol]]
-    current = prices[-1]
-    recent_high = max(prices[:-1])
-    recent_low = min(prices[:-1])
-    
-    made_higher_high = current > recent_high
-    made_lower_low = current < recent_low
-    
-    return (made_higher_high, made_lower_low)
 
 
 def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
@@ -686,29 +678,28 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
     Target: VWAP central line
     Stop: Last swing high/low ± 0.1%
     """
-    global trades_this_hour, last_hour
     
     # Rate limit
     current_hour = datetime.now().hour
-    if current_hour != last_hour:
-        trades_this_hour = 0
-        last_hour = current_hour
+    if current_hour != state.last_hour:
+        state.trades_this_hour = 0
+        state.last_hour = current_hour
     
-    if trades_this_hour >= MAX_TRADES_PER_HOUR:
+    if state.trades_this_hour >= MAX_TRADES_PER_HOUR:
         return None
     
     # Skip if already in position or pending order
-    # Check exit_targets (which tracks positions we're managing)
+    # Check state.exit_targets (which tracks positions we're managing)
     ticker = PERP_TICKERS.get(symbol)
-    if ticker in exit_targets or symbol in pending_orders:
+    if ticker in state.exit_targets or symbol in state.pending_orders:
         return None
     
     # Get VWAP state
-    if symbol not in vwap_states:
+    if symbol not in state.vwap_states:
         return None
     
-    vwap_state = vwap_states[symbol]
-    cvd_state = cvd_states.get(symbol, CVDState())
+    vwap_state = state.vwap_states[symbol]
+    cvd_state = state.cvd_states.get(symbol, CVDState())
     
     # Require valid VWAP data
     if not vwap_state.is_valid():
@@ -720,14 +711,24 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
     if vwap == 0:
         return None
     
-    # Get CVD trend
+    # Get CVD trend with configurable strictness
     cvd_trend = cvd_state.get_cvd_trend()
     
-    # SHORT SIGNAL: Price > VWAP + 2σ AND CVD falling/flat
+    # Determine acceptable CVD trends based on config
+    if cfg.cvd_strict_divergence:
+        # Strict mode: require clear directional divergence (no 'flat')
+        short_cvd_ok = cvd_trend == 'falling'
+        long_cvd_ok = cvd_trend == 'rising'
+    else:
+        # Default: accept flat as "not confirming the move"
+        short_cvd_ok = cvd_trend in ('falling', 'flat')
+        long_cvd_ok = cvd_trend in ('rising', 'flat')
+    
+    # SHORT SIGNAL: Price > VWAP + 2σ AND CVD falling (or flat if not strict)
     if current_price >= upper_band:
-        if cvd_trend in ('falling', 'flat'):
+        if short_cvd_ok:
             # Find last swing high for stop (use recent window, not all history)
-            recent_prices = list(price_history.get(symbol, [{'price': current_price}]))[-20:]
+            recent_prices = list(state.coinbase_price_history.get(symbol, [{'price': current_price}]))[-20:]
             swing_high = max(p['price'] for p in recent_prices)
             stop_loss = swing_high * (1 + STOP_LOSS_BEYOND_WICK_PCT)
             
@@ -747,11 +748,11 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
                 'reason': f'Price above +2σ, CVD {cvd_trend}'
             }
     
-    # LONG SIGNAL: Price < VWAP - 2σ AND CVD rising/flat
+    # LONG SIGNAL: Price < VWAP - 2σ AND CVD rising (or flat if not strict)
     elif current_price <= lower_band:
-        if cvd_trend in ('rising', 'flat'):
+        if long_cvd_ok:
             # Find last swing low for stop (use recent window, not all history)
-            recent_prices = list(price_history.get(symbol, [{'price': current_price}]))[-20:]
+            recent_prices = list(state.coinbase_price_history.get(symbol, [{'price': current_price}]))[-20:]
             swing_low = min(p['price'] for p in recent_prices)
             stop_loss = swing_low * (1 - STOP_LOSS_BEYOND_WICK_PCT)
             
@@ -840,7 +841,6 @@ async def calculate_position_size(client: KalshiClient, symbol: str,
 
 async def execute_entry(client: KalshiClient, signal: dict):
     """Execute entry trade after passing all safety gates."""
-    global trades_this_hour
     
     symbol = signal['symbol']
     ticker = signal['ticker']
@@ -932,8 +932,8 @@ async def execute_entry(client: KalshiClient, signal: dict):
             })
         
         # Ensure clean state - no phantom pending orders
-        if symbol in pending_orders:
-            del pending_orders[symbol]
+        if symbol in state.pending_orders:
+            del state.pending_orders[symbol]
         return
     
     if result.get('order') or result.get('order_id'):
@@ -941,7 +941,7 @@ async def execute_entry(client: KalshiClient, signal: dict):
         log(f"  ✅ Order placed: {order_id}")
         
         # Track as pending order (not filled position yet)
-        pending_orders[symbol] = {
+        state.pending_orders[symbol] = {
             'order_id': order_id,
             'ticker': ticker,
             'symbol': symbol,
@@ -954,7 +954,7 @@ async def execute_entry(client: KalshiClient, signal: dict):
             'placed_time': time.time(),
         }
         
-        trades_this_hour += 1
+        state.trades_this_hour += 1
         
         log_trade({
             'type': 'order_placed',
@@ -977,14 +977,14 @@ async def manage_pending_orders(client: KalshiClient):
     1. Cancel stale orders (price moved too far)
     2. Promote filled orders to positions
     """
-    for symbol in list(pending_orders.keys()):
-        pending = pending_orders[symbol]
+    for symbol in list(state.pending_orders.keys()):
+        pending = state.pending_orders[symbol]
         
         # Get current price
-        if symbol not in price_history or not price_history[symbol]:
+        if symbol not in state.coinbase_price_history or not state.coinbase_price_history[symbol]:
             continue
         
-        current_price = price_history[symbol][-1]['price']
+        current_price = state.coinbase_price_history[symbol][-1]['price']
         order_spot_price = pending['entry_price']
         
         # Check if order is stale (price moved too far)
@@ -996,7 +996,7 @@ async def manage_pending_orders(client: KalshiClient):
             try:
                 result = await run_sync(client.cancel_order, pending['order_id'])
                 log(f"   Cancelled order {pending['order_id'][:8]}...")
-                del pending_orders[symbol]
+                del state.pending_orders[symbol]
                 log_trade({
                     'type': 'order_cancelled',
                     'reason': 'stale_price',
@@ -1050,9 +1050,8 @@ def sync_orders_on_startup(client: KalshiClient):
 def sync_positions_on_startup(client: KalshiClient):
     """
     On startup, check for any existing positions in Kalshi.
-    Create exit_targets for positions that don't have them.
+    Create state.exit_targets for positions that don't have them.
     """
-    global exit_targets
     
     log("Syncing positions from Kalshi...")
     
@@ -1083,7 +1082,7 @@ def sync_positions_on_startup(client: KalshiClient):
         spot_price = contract_to_spot_price(symbol, entry_price_contract)
         
         # Check if we already have exit targets
-        if ticker in exit_targets:
+        if ticker in state.exit_targets:
             log(f"  {symbol}: Already tracking exit targets")
             continue
         
@@ -1091,11 +1090,11 @@ def sync_positions_on_startup(client: KalshiClient):
         
         # Create exit targets using proper strategy logic
         # Target: VWAP if available
-        target = vwap_states[symbol].vwap if symbol in vwap_states else spot_price
+        target = state.vwap_states[symbol].vwap if symbol in state.vwap_states else spot_price
         
         # Stop: Use recent swing + buffer if we have price history, otherwise fallback
-        if symbol in price_history and len(price_history[symbol]) >= 5:
-            recent_prices = list(price_history[symbol])[-20:]
+        if symbol in state.coinbase_price_history and len(state.coinbase_price_history[symbol]) >= 5:
+            recent_prices = list(state.coinbase_price_history[symbol])[-20:]
             if side == 'long':
                 swing_low = min(p['price'] for p in recent_prices)
                 stop_loss = swing_low * (1 - STOP_LOSS_BEYOND_WICK_PCT)
@@ -1117,7 +1116,7 @@ def sync_positions_on_startup(client: KalshiClient):
                 stop_loss = spot_price * (1 + max(MIN_STOP_DISTANCE_PCT, 0.02))
             log(f"    Using fallback stop (no price history): ${stop_loss:,.2f}")
         
-        exit_targets[ticker] = {
+        state.exit_targets[ticker] = {
             'stop_loss': stop_loss,
             'target_price': target,
             'side': side,
@@ -1134,8 +1133,8 @@ async def check_order_fills(client: KalshiClient):
     """
     import requests
     
-    for symbol in list(pending_orders.keys()):
-        pending = pending_orders[symbol]
+    for symbol in list(state.pending_orders.keys()):
+        pending = state.pending_orders[symbol]
         order_id = pending['order_id']
         
         try:
@@ -1155,7 +1154,7 @@ async def check_order_fills(client: KalshiClient):
                 log(f"✅ ORDER FILLED: {symbol} {filled:.0f} contracts")
                 
                 # Store exit targets (position will be tracked via Kalshi API)
-                exit_targets[pending['ticker']] = {
+                state.exit_targets[pending['ticker']] = {
                     'stop_loss': pending['stop_loss'],
                     'target_price': pending['target_price'],
                     'side': pending['side'],
@@ -1172,7 +1171,7 @@ async def check_order_fills(client: KalshiClient):
                     target=pending['target_price']
                 )
                 
-                del pending_orders[symbol]
+                del state.pending_orders[symbol]
                 
                 log_trade({
                     'type': 'order_filled',
@@ -1184,7 +1183,7 @@ async def check_order_fills(client: KalshiClient):
             elif remaining == 0 and filled == 0:
                 # Order was cancelled externally
                 log(f"⚠️ Order {order_id[:8]}... was cancelled externally")
-                del pending_orders[symbol]
+                del state.pending_orders[symbol]
                 
         except Exception as e:
             log(f"Error checking order {order_id[:8]}...: {e}")
@@ -1193,19 +1192,18 @@ async def check_order_fills(client: KalshiClient):
 async def manage_positions(client: KalshiClient):
     """
     Query Kalshi for live positions and check TP/SL.
-    Uses exit_targets dict for stored stop_loss and target_price.
+    Uses state.exit_targets dict for stored stop_loss and target_price.
     """
-    global exit_targets
     
     # Get LIVE positions from Kalshi (async)
     live_positions = await run_sync(client.get_positions)
     
-    # Clean up exit_targets for positions that no longer exist
+    # Clean up state.exit_targets for positions that no longer exist
     live_tickers = {p['ticker'] for p in live_positions}
-    for ticker in list(exit_targets.keys()):
+    for ticker in list(state.exit_targets.keys()):
         if ticker not in live_tickers:
             log(f"[POSITION] Removing stale exit target for {ticker}")
-            del exit_targets[ticker]
+            del state.exit_targets[ticker]
     
     for pos in live_positions:
         ticker = pos['ticker']
@@ -1227,14 +1225,14 @@ async def manage_positions(client: KalshiClient):
         entry_price = contract_to_spot_price(symbol, entry_price_contract)
         
         # Get current spot price
-        if symbol not in price_history or not price_history[symbol]:
+        if symbol not in state.coinbase_price_history or not state.coinbase_price_history[symbol]:
             continue
-        current_price = price_history[symbol][-1]['price']
+        current_price = state.coinbase_price_history[symbol][-1]['price']
         
         # Get or create exit targets for this position
-        if ticker not in exit_targets:
+        if ticker not in state.exit_targets:
             # New position - calculate exit targets
-            vwap = vwap_states[symbol].vwap if symbol in vwap_states else entry_price
+            vwap = state.vwap_states[symbol].vwap if symbol in state.vwap_states else entry_price
             
             if side == 'long':
                 stop_loss = entry_price * 0.98  # 2% below entry
@@ -1243,7 +1241,7 @@ async def manage_positions(client: KalshiClient):
                 stop_loss = entry_price * 1.02  # 2% above entry
                 target_price = vwap
             
-            exit_targets[ticker] = {
+            state.exit_targets[ticker] = {
                 'stop_loss': stop_loss,
                 'target_price': target_price,
                 'side': side,
@@ -1251,14 +1249,14 @@ async def manage_positions(client: KalshiClient):
             }
             log(f"[POSITION] New exit targets for {symbol} {side.upper()}: Stop ${stop_loss:,.2f}, Target ${target_price:,.2f}")
         
-        targets = exit_targets[ticker]
+        targets = state.exit_targets[ticker]
         stop_loss = targets['stop_loss']
         target_price = targets['target_price']
         
         # Update target to current VWAP (dynamic target)
-        if symbol in vwap_states:
-            target_price = vwap_states[symbol].vwap
-            exit_targets[ticker]['target_price'] = target_price
+        if symbol in state.vwap_states:
+            target_price = state.vwap_states[symbol].vwap
+            state.exit_targets[ticker]['target_price'] = target_price
         
         # Check exit conditions
         should_exit = False
@@ -1291,7 +1289,7 @@ async def manage_positions(client: KalshiClient):
                 if side == 'short':
                     pnl_est = -pnl_est
                 log(f"  🔸 DRY RUN: Would exit with PnL ~${pnl_est:+.2f}")
-                # Don't delete exit_targets in dry run so we can keep tracking
+                # Don't delete state.exit_targets in dry run so we can keep tracking
                 continue
             
             # Place exit order (async to avoid blocking)
@@ -1317,24 +1315,22 @@ async def manage_positions(client: KalshiClient):
                 log(f"  PnL: ${pnl:+,.2f}")
                 
                 # === ACCUMULATE TOTAL PNL ===
-                global total_pnl
-                total_pnl += pnl
-                log(f"  Total session PnL: ${total_pnl:+,.2f}")
+                state.total_pnl += pnl
+                log(f"  Total session PnL: ${state.total_pnl:+,.2f}")
                 
                 # === CIRCUIT BREAKER: Track consecutive losses ===
-                global consecutive_losses
                 is_stop_loss = "STOP LOSS" in exit_reason
                 
                 if is_stop_loss:
-                    consecutive_losses += 1
-                    log(f"  ⚠️ Consecutive losses: {consecutive_losses}/{CIRCUIT_BREAKER_CONSECUTIVE_LOSSES}")
-                    if consecutive_losses >= CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
+                    state.consecutive_losses += 1
+                    log(f"  ⚠️ Consecutive losses: {state.consecutive_losses}/{CIRCUIT_BREAKER_CONSECUTIVE_LOSSES}")
+                    if state.consecutive_losses >= CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
                         log(f"  🚨 CIRCUIT BREAKER will trip on next signal check!")
                 else:
                     # Win - reset consecutive loss counter
-                    if consecutive_losses > 0:
-                        log(f"  ✅ Win! Resetting consecutive loss counter (was {consecutive_losses})")
-                    consecutive_losses = 0
+                    if state.consecutive_losses > 0:
+                        log(f"  ✅ Win! Resetting consecutive loss counter (was {state.consecutive_losses})")
+                    state.consecutive_losses = 0
                 
                 # Send Telegram notification
                 notify_exit(
@@ -1343,11 +1339,11 @@ async def manage_positions(client: KalshiClient):
                     exit_price=current_price,
                     pnl=pnl,
                     reason=exit_reason,
-                    consecutive_losses=consecutive_losses
+                    consecutive_losses=state.consecutive_losses
                 )
                 
                 # Remove exit targets
-                del exit_targets[ticker]
+                del state.exit_targets[ticker]
                 
                 log_trade({
                     'type': 'exit',
@@ -1356,7 +1352,7 @@ async def manage_positions(client: KalshiClient):
                     'exit_price': current_price,
                     'contracts': contracts,
                     'pnl': pnl,
-                    'consecutive_losses': consecutive_losses,
+                    'state.consecutive_losses': state.consecutive_losses,
                     'is_stop_loss': is_stop_loss
                 })
             else:
@@ -1369,12 +1365,11 @@ async def manage_positions(client: KalshiClient):
 
 async def log_comprehensive_status(client: KalshiClient):
     """Log comprehensive status snapshot (async to avoid blocking event loop)."""
-    global last_status_log
     
     now = time.time()
-    if now - last_status_log < STATUS_LOG_INTERVAL:
+    if now - state.last_status_log < STATUS_LOG_INTERVAL:
         return
-    last_status_log = now
+    state.last_status_log = now
     
     try:
         # Run sync API calls in thread pool
@@ -1388,8 +1383,8 @@ async def log_comprehensive_status(client: KalshiClient):
         # VWAP states
         vwap_info = {}
         for symbol in PERP_TICKERS:
-            if symbol in vwap_states:
-                state = vwap_states[symbol]
+            if symbol in state.vwap_states:
+                state = state.vwap_states[symbol]
                 lower, vwap, upper = state.get_bands(STD_DEV_MULTIPLIER)
                 current = state.current_price
                 dev, direction = state.get_deviation(current)
@@ -1407,9 +1402,9 @@ async def log_comprehensive_status(client: KalshiClient):
         # CVD states
         cvd_info = {}
         for symbol in PERP_TICKERS:
-            if symbol in cvd_states:
-                cvd = cvd_states[symbol].get_cvd()
-                trend = cvd_states[symbol].get_cvd_trend()
+            if symbol in state.cvd_states:
+                cvd = state.cvd_states[symbol].get_cvd()
+                trend = state.cvd_states[symbol].get_cvd_trend()
                 cvd_info[symbol] = {'value': round(cvd, 2), 'trend': trend}
         
         # Get LIVE positions from Kalshi (async)
@@ -1421,7 +1416,7 @@ async def log_comprehensive_status(client: KalshiClient):
             for sym, tick in PERP_TICKERS.items():
                 if tick == ticker:
                     entry_spot = contract_to_spot_price(sym, pos['entry_price'])
-                    targets = exit_targets.get(ticker, {})
+                    targets = state.exit_targets.get(ticker, {})
                     pos_info[sym] = {
                         'side': pos['side'],
                         'contracts': pos['contracts'],
@@ -1435,9 +1430,9 @@ async def log_comprehensive_status(client: KalshiClient):
         # ADX states
         adx_info = {}
         for symbol in PERP_TICKERS:
-            if symbol in adx_states and adx_states[symbol].is_valid():
-                adx = adx_states[symbol].get_adx()
-                trending = adx_states[symbol].is_trending(ADX_TREND_THRESHOLD)
+            if symbol in state.adx_states and state.adx_states[symbol].is_valid():
+                adx = state.adx_states[symbol].get_adx()
+                trending = state.adx_states[symbol].is_trending(ADX_TREND_THRESHOLD)
                 adx_info[symbol] = {'value': round(adx, 1), 'trending': trending}
         
         # Spread corridor status
@@ -1448,8 +1443,8 @@ async def log_comprehensive_status(client: KalshiClient):
         
         # Console output
         log("-" * 50)
-        halt_status = f" | ⚠️ HALTED: {halt_reason}" if trading_halted else ""
-        log(f"STATUS | Balance: ${balance:.2f} | Positions: {len(live_positions)} | Pending: {len(pending_orders)}{halt_status}")
+        halt_status = f" | ⚠️ HALTED: {state.halt_reason}" if state.trading_halted else ""
+        log(f"STATUS | Balance: ${balance:.2f} | Positions: {len(live_positions)} | Pending: {len(state.pending_orders)}{halt_status}")
         log(f"  BTC: ${btc_spot:,.0f} | ETH: ${eth_spot:,.0f}")
         
         for symbol, info in vwap_info.items():
@@ -1461,7 +1456,7 @@ async def log_comprehensive_status(client: KalshiClient):
         for symbol, cvd in cvd_info.items():
             log(f"  {symbol} CVD: {cvd['value']:+.1f} ({cvd['trend']})")
         
-        for symbol, pending in pending_orders.items():
+        for symbol, pending in state.pending_orders.items():
             log(f"  PENDING {symbol}: {pending['side'].upper()} {pending['contracts']} @ ${pending['entry_price']:,.0f}")
         
         for symbol, pos in pos_info.items():
@@ -1477,8 +1472,8 @@ async def log_comprehensive_status(client: KalshiClient):
             'vwap': vwap_info,
             'cvd': cvd_info,
             'positions': pos_info,
-            'ws_connected': ws_connected.copy(),
-            'trades_this_hour': trades_this_hour
+            'state.ws_connected': state.ws_connected.copy(),
+            'state.trades_this_hour': state.trades_this_hour
         })
         
     except Exception as e:
@@ -1496,8 +1491,8 @@ async def trading_loop(client: KalshiClient):
             
             # Check for entry signals
             for symbol in PERP_TICKERS:
-                if symbol in price_history and price_history[symbol]:
-                    current_price = price_history[symbol][-1]['price']
+                if symbol in state.coinbase_price_history and state.coinbase_price_history[symbol]:
+                    current_price = state.coinbase_price_history[symbol][-1]['price']
                     
                     signal = check_entry_signal(symbol, current_price)
                     if signal:
@@ -1519,15 +1514,14 @@ async def trading_loop(client: KalshiClient):
             log(f"Error in trading loop: {e}")
             # Save state on error
             try:
-                save_state(exit_targets, trades_this_hour, total_pnl)
+                save_state(state.exit_targets, state.trades_this_hour, state.total_pnl)
             except:
                 pass
             await asyncio.sleep(5)
 
 
 def recover_state():
-    """Recover exit_targets from saved state file."""
-    global exit_targets, trades_this_hour, total_pnl
+    """Recover state.exit_targets from saved state file."""
     
     saved = load_state()
     if not saved:
@@ -1537,30 +1531,29 @@ def recover_state():
     log(f"[STATE] Found saved state from {saved.get('saved_at_iso', 'unknown')}")
     
     # Recover exit targets (not positions - those come from Kalshi API)
-    for ticker, target_data in saved.get('exit_targets', {}).items():
-        exit_targets[ticker] = target_data
+    for ticker, target_data in saved.get('state.exit_targets', {}).items():
+        state.exit_targets[ticker] = target_data
         log(f"[STATE] Recovered exit targets for {ticker}")
     
     # Note: VWAP and positions come from live sources
     log(f"[STATE] VWAP will be seeded fresh, positions from Kalshi API")
     
-    trades_this_hour = saved.get('trades_this_hour', 0)
-    total_pnl = saved.get('total_pnl', 0.0)
+    state.trades_this_hour = saved.get('state.trades_this_hour', 0)
+    state.total_pnl = saved.get('state.total_pnl', 0.0)
     
-    log(f"[STATE] Recovery complete: {len(exit_targets)} exit targets, PnL: ${total_pnl:+,.2f}")
+    log(f"[STATE] Recovery complete: {len(state.exit_targets)} exit targets, PnL: ${state.total_pnl:+,.2f}")
 
 
 def periodic_state_save():
     """Save state periodically."""
-    global last_state_save
     
     now = time.time()
-    if now - last_state_save < STATE_SAVE_INTERVAL:
+    if now - state.last_state_save < STATE_SAVE_INTERVAL:
         return
     
-    last_state_save = now
+    state.last_state_save = now
     try:
-        save_state(exit_targets, trades_this_hour, total_pnl)
+        save_state(state.exit_targets, state.trades_this_hour, state.total_pnl)
     except Exception as e:
         log(f"[STATE] Error saving state: {e}")
 
@@ -1601,16 +1594,16 @@ def seed_vwap_from_history():
                 continue
             
             # Initialize VWAP state
-            if symbol not in vwap_states:
-                vwap_states[symbol] = VWAPState()
+            if symbol not in state.vwap_states:
+                state.vwap_states[symbol] = VWAPState()
             
             # Initialize CVD state
-            if symbol not in cvd_states:
-                cvd_states[symbol] = CVDState()
+            if symbol not in state.cvd_states:
+                state.cvd_states[symbol] = CVDState()
             
             # Initialize ADX state
-            if symbol not in adx_states:
-                adx_states[symbol] = ADXState(period=ADX_PERIOD)
+            if symbol not in state.adx_states:
+                state.adx_states[symbol] = ADXState(period=ADX_PERIOD)
             
             # Coinbase candles format: [timestamp, low, high, open, close, volume]
             # They come newest first, so reverse for chronological order
@@ -1645,34 +1638,58 @@ def seed_vwap_from_history():
                     close=close,
                     volume=volume
                 )
-                vwap_states[symbol].candles.append(candle)
+                state.vwap_states[symbol].candles.append(candle)
                 candles_added += 1
                 
                 # Update ADX with historical candle
-                adx_states[symbol].add_candle(high, low, close)
+                state.adx_states[symbol].add_candle(high, low, close)
                 
                 # Update price history
-                if symbol not in price_history:
-                    price_history[symbol] = deque(maxlen=100)
-                price_history[symbol].append({'time': timestamp, 'price': close})
+                if symbol not in state.coinbase_price_history:
+                    state.coinbase_price_history[symbol] = deque(maxlen=100)
+                state.coinbase_price_history[symbol].append({'time': timestamp, 'price': close})
             
             # Set current candle to most recent
-            if vwap_states[symbol].candles:
-                vwap_states[symbol].current_candle = vwap_states[symbol].candles.pop()
+            if state.vwap_states[symbol].candles:
+                state.vwap_states[symbol].current_candle = state.vwap_states[symbol].candles.pop()
             
             # Mark as today's session so check_reset doesn't clear seeded data
-            vwap_states[symbol].last_reset_date = datetime.now(timezone.utc).replace(
+            state.vwap_states[symbol].last_reset_date = datetime.now(timezone.utc).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
             
-            vwap = vwap_states[symbol].vwap
-            lower, _, upper = vwap_states[symbol].get_bands(STD_DEV_MULTIPLIER)
-            std = vwap_states[symbol].std_dev
-            adx = adx_states[symbol].get_adx() if adx_states[symbol].is_valid() else 0.0
+            vwap = state.vwap_states[symbol].vwap
+            lower, _, upper = state.vwap_states[symbol].get_bands(STD_DEV_MULTIPLIER)
+            std = state.vwap_states[symbol].std_dev
+            adx = state.adx_states[symbol].get_adx() if state.adx_states[symbol].is_valid() else 0.0
             log(f"  {symbol}: {candles_added} candles, VWAP: ${vwap:,.2f}, ±2σ: ${lower:,.2f}-${upper:,.2f}, ADX: {adx:.1f}")
             
         except Exception as e:
             log(f"  {symbol}: Error seeding - {e}")
+
+
+async def shutdown(tasks: List[asyncio.Task], client: KalshiClient = None):
+    """Graceful shutdown: cancel tasks, save state, close connections."""
+    log("🛑 Shutting down...")
+    
+    # Save final state
+    try:
+        save_state(state.exit_targets, state.trades_this_hour, state.total_pnl)
+        log("  State saved")
+    except Exception as e:
+        log(f"  State save failed: {e}")
+    
+    # Cancel all tasks
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    
+    # Wait for cancellation to complete
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+        log("  Tasks cancelled")
+    
+    log("  Shutdown complete")
 
 
 async def main():
@@ -1691,7 +1708,7 @@ async def main():
     # Seed VWAP from historical trades if we don't have enough data
     needs_seeding = True
     for symbol in PERP_TICKERS:
-        if symbol in vwap_states and vwap_states[symbol].is_valid():
+        if symbol in state.vwap_states and state.vwap_states[symbol].is_valid():
             needs_seeding = False
             break
     
@@ -1717,13 +1734,45 @@ async def main():
     # Sync existing positions from Kalshi
     sync_positions_on_startup(client)
     
-    # Start WebSocket connections and trading loop
-    await asyncio.gather(
-        kalshi_websocket(),
-        coinbase_websocket(),
-        trading_loop(client)
-    )
+    # Create tasks for concurrent execution
+    tasks = [
+        asyncio.create_task(kalshi_websocket(), name="kalshi_ws"),
+        asyncio.create_task(coinbase_websocket(), name="coinbase_ws"),
+        asyncio.create_task(trading_loop(client), name="trading_loop"),
+    ]
+    
+    # Set up signal handlers for graceful shutdown
+    loop = asyncio.get_event_loop()
+    import signal
+    
+    def handle_signal(sig):
+        log(f"Received signal {sig.name}")
+        asyncio.create_task(shutdown(tasks, client))
+    
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda s=sig: handle_signal(s))
+    
+    try:
+        # Run until any task completes (shouldn't happen normally)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        
+        # If a task finished unexpectedly, log it
+        for task in done:
+            if task.exception():
+                log(f"Task {task.get_name()} failed: {task.exception()}")
+            else:
+                log(f"Task {task.get_name()} completed unexpectedly")
+        
+        # Shutdown remaining tasks
+        await shutdown(list(pending), client)
+        
+    except asyncio.CancelledError:
+        log("Main cancelled")
+        await shutdown(tasks, client)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log("Interrupted by user")

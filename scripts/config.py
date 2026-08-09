@@ -66,6 +66,8 @@ class Config:
     # CVD
     cvd_divergence_window_minutes: int = 30
     cvd_reset_hours: int = 12
+    cvd_strict_divergence: bool = False  # If True, require clear directional CVD (no 'flat')
+    cvd_min_delta_pct: float = 0.0  # Minimum CVD change % to count as diverging (0 = any)
     
     @property
     def total_fee_rate(self) -> float:
@@ -155,6 +157,13 @@ def load_config(config_path: str = None) -> Config:
         rate_limits = data.get('rate_limits', {})
         config.max_trades_per_hour = rate_limits.get('max_trades_per_hour', 10)
         config.poll_interval_seconds = rate_limits.get('poll_interval_seconds', 0.5)
+        
+        # CVD settings
+        cvd = data.get('cvd', {})
+        config.cvd_divergence_window_minutes = cvd.get('divergence_window_minutes', 30)
+        config.cvd_reset_hours = cvd.get('reset_hours', 12)
+        config.cvd_strict_divergence = cvd.get('strict_divergence', False)
+        config.cvd_min_delta_pct = cvd.get('min_delta_pct', 0.0)
         
         print(f"[CONFIG] Loaded from {config_file}")
         print(f"[CONFIG] Assets: {list(config.assets.keys())}")
