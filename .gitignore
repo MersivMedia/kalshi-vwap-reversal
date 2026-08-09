@@ -1,0 +1,31 @@
+# Logs
+*.log
+logs/
+
+# State files (contains position data)
+state/
+*.pid
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Keys (NEVER commit)
+*.pem
+*.key
+keys/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

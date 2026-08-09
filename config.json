@@ -1,0 +1,57 @@
+{
+    "version": "1.0.0",
+    
+    "assets": {
+        "BTC": {
+            "kalshi_ticker": "KXBTCPERP",
+            "coinbase_symbol": "BTC-USD",
+            "enabled": true,
+            "size_multiplier": 1.0
+        },
+        "ETH": {
+            "kalshi_ticker": "KXETHPERP", 
+            "coinbase_symbol": "ETH-USD",
+            "enabled": true,
+            "size_multiplier": 1.0
+        }
+    },
+    
+    "vwap": {
+        "reset_hour_utc": 0,
+        "sd_bands": [1, 2, 3]
+    },
+    
+    "entry": {
+        "min_deviation_sd": 2.0,
+        "ideal_deviation_sd": 2.5,
+        "require_cvd_divergence": true,
+        "avoid_trending_days": true
+    },
+    
+    "exit": {
+        "tp1_band": 1,
+        "tp2_band": 0,
+        "tp1_size_pct": 0.5,
+        "stop_beyond_wick_pct": 0.001
+    },
+    
+    "risk": {
+        "max_risk_per_trade_pct": 0.30,
+        "max_account_risk_pct": 0.50,
+        "use_isolated_margin": true,
+        "max_leverage": 10
+    },
+    
+    "rate_limits": {
+        "max_trades_per_hour": 10,
+        "poll_interval_seconds": 0.5
+    },
+    
+    "notes": [
+        "VWAP resets at midnight UTC",
+        "Entry on ±2σ pierce with CVD divergence",
+        "TP1 at ±1σ (50%), TP2 at VWAP (remaining)",
+        "Stop 0.1% past extreme wick",
+        "Isolated margin only - never cross"
+    ]
+}
