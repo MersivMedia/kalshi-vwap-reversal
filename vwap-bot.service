@@ -1,0 +1,32 @@
+[Unit]
+Description=Kalshi VWAP Reversal Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clawdbot
+Group=clawdbot
+WorkingDirectory=/home/clawdbot/clawd/projects/kalshi-vwap-reversal
+Environment="PATH=/home/clawdbot/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=/home/clawdbot/clawd/.env
+ExecStartPre=/bin/bash -c 'if [ -f state/circuit_breaker.json ]; then echo "Circuit breaker tripped - not starting"; exit 1; fi'
+ExecStart=/usr/bin/python3 -u scripts/vwap_reversal_bot.py
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=77
+
+# Logging
+StandardOutput=append:/home/clawdbot/clawd/projects/kalshi-vwap-reversal/bot.log
+StandardError=append:/home/clawdbot/clawd/projects/kalshi-vwap-reversal/bot.log
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

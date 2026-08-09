@@ -173,6 +173,33 @@ The bot will log blocked signals with reasons:
 ❌ BLOCKED: Fee hurdle: profit $18.50 < min $29.15
 ```
 
+## Telegram Notifications
+
+Set in `.env`:
+```bash
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+TELEGRAM_CHAT_ID=6854193499
+```
+
+Notifications sent for:
+- 🟢/🔴 Trade entries (filled orders)
+- ✅/❌ Trade exits (P&L)
+- 🚨 Circuit breaker trips
+
+## systemd Service
+
+Install service for auto-restart on reboot:
+```bash
+./setup_systemd.sh
+
+# Control
+sudo systemctl start vwap-bot
+sudo systemctl stop vwap-bot
+sudo systemctl status vwap-bot
+```
+
+Service respects circuit breaker — won't start if tripped.
+
 ## License
 
 MIT

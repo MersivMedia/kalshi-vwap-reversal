@@ -36,6 +36,8 @@ from dotenv import load_dotenv
 load_dotenv('/home/clawdbot/clawd/.env')
 
 from state_manager import save_state, load_state, clear_state
+from notifier import (notify_entry, notify_exit, notify_circuit_breaker, 
+                      notify_startup, notify_error)
 
 # ============================================================
 # CONFIGURATION
@@ -600,6 +602,9 @@ def check_circuit_breaker() -> Tuple[bool, str]:
         # Save to disk so watchdog knows not to restart
         from state_manager import save_circuit_breaker
         save_circuit_breaker(consecutive_losses)
+        
+        # Send Telegram alert
+        notify_circuit_breaker(consecutive_losses)
         
         return (False, f"Circuit breaker triggered: {consecutive_losses} consecutive losses")
     
@@ -1606,6 +1611,16 @@ def check_order_fills(client: KalshiClient):
                     'entry_price': pending['entry_price']
                 }
                 
+                # Send Telegram notification
+                notify_entry(
+                    symbol=symbol,
+                    side=pending['side'],
+                    contracts=int(filled),
+                    entry_price=pending['entry_price'],
+                    stop_loss=pending['stop_loss'],
+                    target=pending['target_price']
+                )
+                
                 del pending_orders[symbol]
                 
                 log_trade({
@@ -1754,6 +1769,16 @@ async def manage_positions(client: KalshiClient):
                     if consecutive_losses > 0:
                         log(f"  ✅ Win! Resetting consecutive loss counter (was {consecutive_losses})")
                     consecutive_losses = 0
+                
+                # Send Telegram notification
+                notify_exit(
+                    symbol=symbol,
+                    side=side,
+                    exit_price=current_price,
+                    pnl=pnl,
+                    reason=exit_reason,
+                    consecutive_losses=consecutive_losses
+                )
                 
                 # Remove exit targets
                 del exit_targets[ticker]
@@ -2121,6 +2146,9 @@ async def main():
     if balance <= 0:
         log("❌ No balance!")
         return
+    
+    # Send startup notification
+    notify_startup(balance)
     
     # Cancel any stale orders from previous runs
     sync_orders_on_startup(client)
