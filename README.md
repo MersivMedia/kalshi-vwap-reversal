@@ -1,40 +1,45 @@
-# Kalshi Perps VWAP Reversal Bot
+# Kalshi Perps VWAP Reversal Bot v2.0
 
-Mean-reversion scalping on Kalshi perpetual futures using VWAP bands and order flow confirmation.
+Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow confirmation, and multi-layer safety gates.
 
 ## Strategy Overview
 
 ```
          +3σ ═══════════════════════  EXTREME OVERBOUGHT (short zone)
          +2σ ───────────────────────  Entry zone for shorts
-         +1σ - - - - - - - - - - - -  TP1 for shorts
               
-         VWAP ════════════════════════  Fair value (TP2)
+         VWAP ════════════════════════  Fair value (TARGET)
               
-         -1σ - - - - - - - - - - - -  TP1 for longs  
          -2σ ───────────────────────  Entry zone for longs
          -3σ ═══════════════════════  EXTREME OVERSOLD (long zone)
 ```
 
+**v2.0 Changes:**
+- Single VWAP target (no TP1/TP2 split) — reduces fee friction
+- 5 safety gates before entry — prevents bad trades
+- `post_only` orders — guaranteed maker fees (0.01%)
+- ADX trend filter — no fading strong trends
+- Spread corridor killswitch — halts on cross-venue divergence
+
 ## Entry Rules
 
-### Long Setup (Fading Lower Bands)
-1. **Extension**: Price pierces below -2σ band
-2. **Order Flow Exhaustion**: Red delta bars leading into extreme, then absorption
-3. **CVD Divergence**: Price makes lower low, CVD makes higher low
-4. **Trigger**: Enter long when price closes back inside -2σ band
-5. **Stop**: 0.1% below the extreme wick
-6. **TP1**: -1σ band (take 50%)
-7. **TP2**: VWAP (close remaining)
+### Signal Detection
+1. **Extension**: Price pierces ±2σ band
+2. **CVD Divergence**: Price vs cumulative volume delta diverging
+3. **Trigger**: All safety gates pass
 
-### Short Setup (Fading Upper Bands)
-1. **Extension**: Price pierces above +2σ band  
-2. **Order Flow Exhaustion**: Green delta bars into extreme, then rejection
-3. **CVD Divergence**: Price makes higher high, CVD makes lower high
-4. **Trigger**: Enter short when price breaks back through +2σ
-5. **Stop**: 0.1% above the extreme wick
-6. **TP1**: +1σ band (take 50%)
-7. **TP2**: VWAP (close remaining)
+### Safety Gates (All Must Pass)
+
+| Gate | Check | Threshold |
+|------|-------|-----------|
+| 1. Fee Hurdle | Profit distance > fees + margin | > 0.145% (0.045% fees + 0.1% profit) |
+| 2. Spread Corridor | \|Kalshi - Coinbase\| | < 0.15% |
+| 3. ADX Filter | Trend strength | ADX(14) < 25 |
+| 4. OBI Confirmation | Order book imbalance | ±0.20 supporting direction |
+
+### Exit
+- **Target**: VWAP (single exit, no partial scaling)
+- **Stop**: 0.1% past extreme wick
 
 ## Key Indicators
 
@@ -50,53 +55,62 @@ CVD = Σ(Buy Volume) - Σ(Sell Volume)
 ```
 Tracks aggressive buying vs selling. Divergence = exhaustion signal.
 
-### Standard Deviation Bands
+### ADX (Average Directional Index)
 ```
-Upper Band = VWAP + (n × σ)
-Lower Band = VWAP - (n × σ)
+ADX = Smoothed(|+DI - -DI| / |+DI + -DI|) × 100
 ```
-Dynamic support/resistance based on volume distribution.
+- ADX > 25 = Strong trend (DON'T fade bands)
+- ADX < 20 = Ranging market (safe for mean reversion)
+
+### OBI (Order Book Imbalance)
+```
+OBI = (Bid Volume - Ask Volume) / Total Volume
+```
+- OBI > +0.20 = Buyers resting (supports longs)
+- OBI < -0.20 = Sellers resting (supports shorts)
+
+## Fee Structure
+
+| Type | Rate | When |
+|------|------|------|
+| Maker | 0.01% | Entry (post_only) |
+| Taker | 0.035% | Exit (IOC) |
+| **Round-trip** | **0.045%** | Total cost |
+
+Break-even distances:
+- BTC: ~$29 profit needed
+- ETH: ~$0.86 profit needed
 
 ## Risk Management
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Max risk/trade | 1% | Fixed fractional method |
-| Position sizing | Risk / Stop Distance | Never arbitrary leverage |
-| Margin mode | ISOLATED | Protect portfolio from anomalies |
-| Max leverage | 10x | Keep liquidation far from stop |
-| Max trades/hour | 10 | Prevent overtrading |
-
-### Position Size Formula
-```
-Size = (Account × Risk%) / |Entry - Stop|
-
-Example:
-- Account: $5,000
-- Risk: 1% = $50
-- Entry: $150
-- Stop: $142.50
-- Distance: $7.50
-- Size: $50 / $7.50 = 6.67 contracts
-```
+| Max margin/trade | 30% | Conservative exposure |
+| Max risk/trade | 10% | Loss at stop |
+| Effective leverage | 5x | Keep liquidation far |
+| Min stop distance | 0.3% | Prevent oversizing |
+| Margin mode | ISOLATED | Protect portfolio |
 
 ## Data Feeds
 
 | Source | Data | Purpose |
 |--------|------|---------|
-| Kalshi WebSocket | Perp prices, trades | Primary execution |
-| Coinbase WebSocket | Spot prices, trades | Cross-market confirmation |
+| Kalshi WebSocket | Perp prices, trades | Execution, OBI |
+| Coinbase WebSocket | Spot prices, trades | VWAP, CVD, ADX, spread corridor |
 
 ## Files
 
 ```
 kalshi-vwap-reversal/
 ├── scripts/
-│   └── vwap_reversal_bot.py   # Main trading bot
+│   ├── vwap_reversal_bot.py   # Main trading bot
+│   └── state_manager.py       # State persistence
 ├── logs/
 │   └── trades.jsonl           # Trade log
-├── config.json                 # Configuration
-└── README.md                   # This file
+├── state/
+│   └── bot_state.json         # Persisted state
+├── config.json                # Configuration
+└── README.md
 ```
 
 ## Setup
@@ -105,7 +119,7 @@ kalshi-vwap-reversal/
 
 ```bash
 export KALSHI_API_KEY_ID="your-api-key-id"
-export KALSHI_KEY_PATH="/path/to/kalshi_private.pem"  # Optional, defaults to keys/kalshi_private.pem
+export KALSHI_KEY_PATH="/path/to/kalshi_private.pem"
 ```
 
 ### Get API Credentials
@@ -117,7 +131,7 @@ export KALSHI_KEY_PATH="/path/to/kalshi_private.pem"  # Optional, defaults to ke
 ### Install Dependencies
 
 ```bash
-pip install websockets aiohttp cryptography
+pip install websockets aiohttp cryptography python-dotenv
 ```
 
 ## Usage
@@ -125,32 +139,38 @@ pip install websockets aiohttp cryptography
 ```bash
 cd kalshi-vwap-reversal
 
-# Dry run (paper trade)
-python scripts/vwap_reversal_bot.py --dry-run
-
 # Live trading
 python scripts/vwap_reversal_bot.py --execute
 
 # Background
 nohup python scripts/vwap_reversal_bot.py --execute > bot.log 2>&1 &
+
+# Monitor
+tail -f bot.log
 ```
 
-## When NOT to Trade
+## Status Output
 
-- **Strong trend days**: VWAP slope > 0.1% per hour
-- **Low volume**: Below average session volume
-- **News events**: Avoid first 15 min after major announcements
-- **Weekend sessions**: Lower liquidity, wider spreads
-
-## Performance Tracking
-
-After 2-3 weeks with consistent sizing:
 ```
-Win Rate: ____%
-Avg Win: $____
-Avg Loss: $____
-R:R Ratio: ____
-Expectancy: $____ per trade
+STATUS | Balance: $700.46 | Positions: 0 | Pending: 0
+  BTC: $64,782 | ETH: $1,914
+  BTC VWAP: $64,788 | ±2σ: $64,651-$64,925 | Dev: 0.2σ below | ADX: 18.3 | Spread: 0.012%
+  ETH VWAP: $1,914 | ±2σ: $1,911-$1,917 | Dev: 0.4σ above | ADX: 22.1 | Spread: 0.008%
+  BTC CVD: +0.0 (flat)
+  ETH CVD: +0.0 (flat)
 ```
 
-Only scale up after proving positive expectancy.
+## When Trading is Blocked
+
+The bot will log blocked signals with reasons:
+
+```
+❌ BLOCKED: ADX trending: 28.3 > 25 threshold
+❌ BLOCKED: Spread corridor: 0.182% > 0.15% max
+❌ BLOCKED: OBI unsupportive for long: -0.15 < +0.20
+❌ BLOCKED: Fee hurdle: profit $18.50 < min $29.15
+```
+
+## License
+
+MIT

@@ -1,5 +1,5 @@
 {
-    "version": "1.0.0",
+    "version": "2.0.0",
     
     "assets": {
         "BTC": {
@@ -18,28 +18,45 @@
     
     "vwap": {
         "reset_hour_utc": 0,
-        "sd_bands": [1, 2, 3]
+        "sd_bands": [1, 2, 3],
+        "entry_band": 2.0
     },
     
     "entry": {
         "min_deviation_sd": 2.0,
-        "ideal_deviation_sd": 2.5,
-        "require_cvd_divergence": true,
-        "avoid_trending_days": true
+        "require_cvd_divergence": true
     },
     
     "exit": {
-        "tp1_band": 1,
-        "tp2_band": 0,
-        "tp1_size_pct": 0.5,
+        "target": "vwap",
         "stop_beyond_wick_pct": 0.001
     },
     
+    "safety_gates": {
+        "fee_hurdle_min_profit_pct": 0.001,
+        "spread_corridor_max_pct": 0.0015,
+        "adx_period": 14,
+        "adx_trend_threshold": 25,
+        "obi_min_threshold": 0.20,
+        "obi_depth_levels": 5
+    },
+    
+    "fees": {
+        "maker_rate": 0.0001,
+        "taker_rate": 0.00035
+    },
+    
     "risk": {
-        "max_risk_per_trade_pct": 0.30,
-        "max_account_risk_pct": 0.50,
+        "max_risk_per_trade_pct": 0.10,
+        "max_margin_pct": 0.30,
         "use_isolated_margin": true,
-        "max_leverage": 10
+        "max_leverage": 5,
+        "min_stop_distance_pct": 0.003
+    },
+    
+    "orders": {
+        "post_only_entries": true,
+        "time_in_force": "good_till_canceled"
     },
     
     "rate_limits": {
@@ -48,9 +65,11 @@
     },
     
     "notes": [
+        "v2.0: Single VWAP target (no TP1/TP2 split)",
+        "v2.0: Safety gates - Fee hurdle, Spread corridor, ADX filter, OBI confirmation",
+        "v2.0: post_only orders for guaranteed maker fees",
         "VWAP resets at midnight UTC",
         "Entry on ±2σ pierce with CVD divergence",
-        "TP1 at ±1σ (50%), TP2 at VWAP (remaining)",
         "Stop 0.1% past extreme wick",
         "Isolated margin only - never cross"
     ]

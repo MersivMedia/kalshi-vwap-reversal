@@ -86,6 +86,18 @@ TAKER_FEE_RATE = 0.00035  # 0.035% taker fee
 TOTAL_FEE_RATE = MAKER_FEE_RATE + TAKER_FEE_RATE  # 0.045%
 MIN_PROFIT_MARGIN = 0.001  # Require at least 0.1% net profit after fees
 
+# === NEW: Safety Gates ===
+# Spread Corridor: Halt if Kalshi and Coinbase diverge too much
+SPREAD_CORRIDOR_MAX_PCT = 0.0015  # 0.15% max divergence before halting
+
+# ADX Trend Filter: Don't fade bands during strong trends
+ADX_PERIOD = 14
+ADX_TREND_THRESHOLD = 25  # ADX > 25 = trending market, skip mean reversion
+
+# Order Book Imbalance (OBI): Confirm passive flow supports trade direction
+OBI_MIN_THRESHOLD = 0.20  # Require +0.20 OBI for longs, -0.20 for shorts
+OBI_DEPTH_LEVELS = 5  # Use top 5 levels of orderbook
+
 # Risk Management
 MAX_RISK_PER_TRADE_PCT = 0.30  # 30% max risk (aggressive for small account)
 MAX_ACCOUNT_RISK_PCT = 0.50  # 50% max total exposure
@@ -165,9 +177,11 @@ class VWAPState:
         current_minute = now.replace(second=0, microsecond=0)
         
         if self.current_candle is None or self.current_candle.time != current_minute:
-            # Start new candle
+            # Start new candle - first finalize the previous one
             if self.current_candle is not None:
                 self.candles.append(self.current_candle)
+                # Return completed candle info for ADX update
+                self._last_completed_candle = self.current_candle
             
             self.current_candle = Candle(
                 time=current_minute,
@@ -347,6 +361,210 @@ class CVDState:
         return trend in ('rising', 'flat')
 
 
+class ADXState:
+    """
+    Average Directional Index (ADX) for trend strength detection.
+    ADX > 25 = trending market (don't fade bands)
+    ADX < 20 = ranging market (mean reversion favorable)
+    
+    Uses Wilder's smoothing with configurable period.
+    """
+    def __init__(self, period: int = 14):
+        self.period = period
+        self.price_history: deque = deque(maxlen=period * 3)  # high, low, close
+        self.tr_history: deque = deque(maxlen=period + 1)
+        self.plus_dm_history: deque = deque(maxlen=period + 1)
+        self.minus_dm_history: deque = deque(maxlen=period + 1)
+        self.smoothed_tr: float = 0.0
+        self.smoothed_plus_dm: float = 0.0
+        self.smoothed_minus_dm: float = 0.0
+        self.plus_di: float = 0.0
+        self.minus_di: float = 0.0
+        self.adx: float = 0.0
+        self.dx_history: deque = deque(maxlen=period + 1)
+    
+    def add_candle(self, high: float, low: float, close: float):
+        """Process a new candle and update ADX."""
+        if len(self.price_history) == 0:
+            self.price_history.append((high, low, close))
+            return
+        
+        prev_high, prev_low, prev_close = self.price_history[-1]
+        self.price_history.append((high, low, close))
+        
+        # True Range
+        tr = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close)
+        )
+        self.tr_history.append(tr)
+        
+        # Directional Movement
+        up_move = high - prev_high
+        down_move = prev_low - low
+        
+        plus_dm = up_move if up_move > down_move and up_move > 0 else 0
+        minus_dm = down_move if down_move > up_move and down_move > 0 else 0
+        
+        self.plus_dm_history.append(plus_dm)
+        self.minus_dm_history.append(minus_dm)
+        
+        # Need enough data
+        if len(self.tr_history) < self.period:
+            return
+        
+        # Wilder's smoothing
+        if self.smoothed_tr == 0:
+            # First calculation - simple sum
+            self.smoothed_tr = sum(list(self.tr_history)[-self.period:])
+            self.smoothed_plus_dm = sum(list(self.plus_dm_history)[-self.period:])
+            self.smoothed_minus_dm = sum(list(self.minus_dm_history)[-self.period:])
+        else:
+            # Wilder smoothing: prev - (prev/period) + current
+            self.smoothed_tr = self.smoothed_tr - (self.smoothed_tr / self.period) + tr
+            self.smoothed_plus_dm = self.smoothed_plus_dm - (self.smoothed_plus_dm / self.period) + plus_dm
+            self.smoothed_minus_dm = self.smoothed_minus_dm - (self.smoothed_minus_dm / self.period) + minus_dm
+        
+        # Directional Indicators
+        if self.smoothed_tr > 0:
+            self.plus_di = 100 * self.smoothed_plus_dm / self.smoothed_tr
+            self.minus_di = 100 * self.smoothed_minus_dm / self.smoothed_tr
+        
+        # Directional Index (DX)
+        di_sum = self.plus_di + self.minus_di
+        if di_sum > 0:
+            dx = 100 * abs(self.plus_di - self.minus_di) / di_sum
+            self.dx_history.append(dx)
+            
+            # ADX is smoothed DX
+            if len(self.dx_history) >= self.period:
+                if self.adx == 0:
+                    self.adx = sum(self.dx_history) / len(self.dx_history)
+                else:
+                    self.adx = ((self.adx * (self.period - 1)) + dx) / self.period
+    
+    def get_adx(self) -> float:
+        """Return current ADX value."""
+        return self.adx
+    
+    def is_trending(self, threshold: float = 25.0) -> bool:
+        """Returns True if market is in a strong trend."""
+        return self.adx >= threshold
+    
+    def is_valid(self) -> bool:
+        """ADX needs enough candles to be meaningful."""
+        return len(self.dx_history) >= self.period
+
+
+# ============================================================
+# SAFETY GATES
+# ============================================================
+
+def check_spread_corridor(symbol: str) -> Tuple[bool, float]:
+    """
+    Check if Kalshi and Coinbase prices are within acceptable divergence.
+    Returns (is_safe, divergence_pct).
+    
+    If divergence > SPREAD_CORRIDOR_MAX_PCT, trading should halt.
+    """
+    kalshi_price = kalshi_prices.get(symbol, 0)
+    coinbase_price = coinbase_prices.get(symbol, 0)
+    
+    if kalshi_price == 0 or coinbase_price == 0:
+        return (True, 0.0)  # Can't check, allow trading
+    
+    divergence = abs(kalshi_price - coinbase_price) / coinbase_price
+    is_safe = divergence <= SPREAD_CORRIDOR_MAX_PCT
+    
+    return (is_safe, divergence)
+
+
+def calculate_obi(client, ticker: str) -> float:
+    """
+    Calculate Order Book Imbalance (OBI) from Kalshi orderbook.
+    
+    OBI = (Bid Volume - Ask Volume) / Total Volume
+    
+    Range: -1.0 (all asks) to +1.0 (all bids)
+    Positive OBI = more resting buy orders (supports longs)
+    Negative OBI = more resting sell orders (supports shorts)
+    """
+    try:
+        ob = client.get_orderbook(ticker, depth=OBI_DEPTH_LEVELS)
+        orderbook = ob.get('orderbook', {})
+        
+        bids = orderbook.get('bids', [])
+        asks = orderbook.get('asks', [])
+        
+        # Sum volume at each level
+        # Format: [[price, size], ...]
+        bid_volume = sum(float(level[1]) for level in bids[:OBI_DEPTH_LEVELS])
+        ask_volume = sum(float(level[1]) for level in asks[:OBI_DEPTH_LEVELS])
+        
+        total_volume = bid_volume + ask_volume
+        
+        if total_volume == 0:
+            return 0.0
+        
+        obi = (bid_volume - ask_volume) / total_volume
+        return obi
+        
+    except Exception as e:
+        log(f"OBI calculation error for {ticker}: {e}")
+        return 0.0
+
+
+def validate_entry_gates(client, symbol: str, side: str, entry_price: float, target_price: float) -> Tuple[bool, str]:
+    """
+    Run all safety gates before allowing entry.
+    Returns (can_enter, reason).
+    
+    Gates:
+    1. Fee hurdle (profit > fees + margin)
+    2. Spread corridor (Kalshi/Coinbase alignment)
+    3. ADX trend filter (no fading strong trends)
+    4. OBI confirmation (orderbook supports direction)
+    """
+    global trading_halted, halt_reason
+    
+    ticker = PERP_TICKERS[symbol]
+    
+    # Gate 1: Fee Hurdle
+    profit_distance = abs(entry_price - target_price)
+    min_required = entry_price * (TOTAL_FEE_RATE + MIN_PROFIT_MARGIN)
+    
+    if profit_distance < min_required:
+        return (False, f"Fee hurdle: profit ${profit_distance:.2f} < min ${min_required:.2f}")
+    
+    # Gate 2: Spread Corridor
+    is_safe, divergence = check_spread_corridor(symbol)
+    if not is_safe:
+        trading_halted = True
+        halt_reason = f"{symbol} spread corridor breach: {divergence*100:.3f}%"
+        return (False, f"Spread corridor: {divergence*100:.3f}% > {SPREAD_CORRIDOR_MAX_PCT*100:.2f}% max")
+    else:
+        trading_halted = False
+        halt_reason = ""
+    
+    # Gate 3: ADX Trend Filter
+    adx_value = 0.0
+    if symbol in adx_states and adx_states[symbol].is_valid():
+        adx_value = adx_states[symbol].get_adx()
+        if adx_value > ADX_TREND_THRESHOLD:
+            return (False, f"ADX trending: {adx_value:.1f} > {ADX_TREND_THRESHOLD} threshold")
+    
+    # Gate 4: OBI Confirmation
+    obi = calculate_obi(client, ticker)
+    
+    if side == 'long' and obi < OBI_MIN_THRESHOLD:
+        return (False, f"OBI unsupportive for long: {obi:+.2f} < +{OBI_MIN_THRESHOLD}")
+    elif side == 'short' and obi > -OBI_MIN_THRESHOLD:
+        return (False, f"OBI unsupportive for short: {obi:+.2f} > -{OBI_MIN_THRESHOLD}")
+    
+    return (True, f"All gates passed (OBI: {obi:+.2f}, ADX: {adx_value:.1f})")
+
+
 # ============================================================
 # GLOBAL STATE
 # ============================================================
@@ -357,7 +575,16 @@ ws_last_message = {'kalshi': 0.0, 'coinbase': 0.0}
 # Per-symbol state
 vwap_states: Dict[str, VWAPState] = {}
 cvd_states: Dict[str, CVDState] = {}
-price_history: Dict[str, deque] = {}  # For high/low detection
+adx_states: Dict[str, 'ADXState'] = {}  # ADX trend filter
+price_history: Dict[str, deque] = {}  # For high/low detection (Coinbase)
+
+# Cross-venue price tracking for spread corridor
+kalshi_prices: Dict[str, float] = {}   # Latest Kalshi mid prices
+coinbase_prices: Dict[str, float] = {} # Latest Coinbase spot prices
+
+# Trading halted flag (spread corridor breach)
+trading_halted: bool = False
+halt_reason: str = ""
 
 # Exit targets - stored locally for each position (by ticker)
 # Format: {ticker: {'stop_loss': float, 'target_price': float, 'side': str, 'entry_price': float}}
@@ -469,7 +696,9 @@ class KalshiClient:
         # Convert side to bid/ask
         api_side = 'bid' if side.lower() in ('long', 'buy', 'bid') else 'ask'
         
-        # Time in force
+        # Time in force and post_only for maker fees
+        # Entry orders: GTC + post_only = maker fee (0.01%)
+        # Exit orders: IOC = may be taker (0.035%) but ensures execution
         tif = 'immediate_or_cancel' if reduce_only else 'good_till_canceled'
         
         order_data = {
@@ -481,6 +710,10 @@ class KalshiClient:
             'time_in_force': tif,
             'self_trade_prevention_type': 'taker_at_cross'
         }
+        
+        # Entry orders use post_only for guaranteed maker fees
+        if not reduce_only:
+            order_data['post_only'] = True
         
         if reduce_only:
             order_data['reduce_only'] = True
@@ -630,19 +863,23 @@ def handle_kalshi_message(data: dict):
         
         if symbol:
             trade = data.get('msg', {})
-            price = float(trade.get('price', 0))
+            contract_price = float(trade.get('price', 0))
             size = float(trade.get('count', 0))
             side = 'buy' if trade.get('taker_side') == 'yes' else 'sell'
+            
+            # Convert contract price to spot for spread corridor tracking
+            spot_price = contract_to_spot_price(symbol, contract_price)
+            kalshi_prices[symbol] = spot_price
             
             # Update CVD
             if symbol not in cvd_states:
                 cvd_states[symbol] = CVDState()
-            cvd_states[symbol].add_trade(price, size, side)
+            cvd_states[symbol].add_trade(spot_price, size, side)
             
             # Update VWAP (candle-based)
             if symbol not in vwap_states:
                 vwap_states[symbol] = VWAPState()
-            vwap_states[symbol].process_trade(price, size, side)
+            vwap_states[symbol].process_trade(spot_price, size, side)
     
     elif msg_type == 'ticker':
         # Price update
@@ -650,11 +887,15 @@ def handle_kalshi_message(data: dict):
         symbol = next((s for s, t in PERP_TICKERS.items() if t == ticker), None)
         
         if symbol:
-            price = float(data.get('msg', {}).get('last_price', 0))
-            if price > 0:
+            contract_price = float(data.get('msg', {}).get('last_price', 0))
+            if contract_price > 0:
+                # Convert to spot price for spread corridor
+                spot_price = contract_to_spot_price(symbol, contract_price)
+                kalshi_prices[symbol] = spot_price
+                
                 if symbol not in price_history:
                     price_history[symbol] = deque(maxlen=100)
-                price_history[symbol].append({'time': time.time(), 'price': price})
+                price_history[symbol].append({'time': time.time(), 'price': spot_price})
 
 
 async def coinbase_websocket():
@@ -707,15 +948,31 @@ def handle_coinbase_message(data: dict):
                     size = float(trade.get('size', 0))
                     side = trade.get('side', 'UNKNOWN')  # 'BUY' or 'SELL'
                     
+                    # Track Coinbase spot price for spread corridor
+                    coinbase_prices[symbol] = price
+                    
                     # Update VWAP (candle-based)
                     if symbol not in vwap_states:
                         vwap_states[symbol] = VWAPState()
+                    
+                    # Track candle count before processing
+                    prev_candle_count = len(vwap_states[symbol].candles)
                     vwap_states[symbol].process_trade(price, size, side)
+                    new_candle_count = len(vwap_states[symbol].candles)
                     
                     # Update CVD
                     if symbol not in cvd_states:
                         cvd_states[symbol] = CVDState()
                     cvd_states[symbol].add_trade(price, size, side)
+                    
+                    # Update ADX when a new candle completes
+                    if symbol not in adx_states:
+                        adx_states[symbol] = ADXState(period=ADX_PERIOD)
+                    
+                    # If a candle just completed, update ADX with it
+                    if new_candle_count > prev_candle_count and vwap_states[symbol].candles:
+                        completed = vwap_states[symbol].candles[-1]
+                        adx_states[symbol].add_candle(completed.high, completed.low, completed.close)
                     
                     # Update price history for swing detection
                     if symbol not in price_history:
@@ -937,7 +1194,7 @@ def calculate_position_size(client: KalshiClient, symbol: str,
 
 
 async def execute_entry(client: KalshiClient, signal: dict):
-    """Execute entry trade."""
+    """Execute entry trade after passing all safety gates."""
     global trades_this_hour
     
     symbol = signal['symbol']
@@ -949,6 +1206,28 @@ async def execute_entry(client: KalshiClient, signal: dict):
     log(f"  Entry: ${signal['entry_price']:,.2f}")
     log(f"  Stop: ${signal['stop_loss']:,.2f}")
     log(f"  Target (VWAP): ${signal['target_price']:,.2f}")
+    
+    # === SAFETY GATES ===
+    can_enter, gate_reason = validate_entry_gates(
+        client, 
+        symbol, 
+        signal['side'], 
+        signal['entry_price'], 
+        signal['target_price']
+    )
+    
+    if not can_enter:
+        log(f"  ❌ BLOCKED: {gate_reason}")
+        log_trade({
+            'type': 'signal_blocked',
+            'symbol': symbol,
+            'side': signal['side'],
+            'reason': gate_reason,
+            'entry_price': signal['entry_price']
+        })
+        return
+    
+    log(f"  ✅ {gate_reason}")
     
     # Calculate size (number of contracts)
     contracts = calculate_position_size(client, symbol, signal['entry_price'], signal['stop_loss'])
@@ -1391,14 +1670,31 @@ def log_comprehensive_status(client: KalshiClient):
                     }
                     break
         
+        # ADX states
+        adx_info = {}
+        for symbol in PERP_TICKERS:
+            if symbol in adx_states and adx_states[symbol].is_valid():
+                adx = adx_states[symbol].get_adx()
+                trending = adx_states[symbol].is_trending(ADX_TREND_THRESHOLD)
+                adx_info[symbol] = {'value': round(adx, 1), 'trending': trending}
+        
+        # Spread corridor status
+        spread_info = {}
+        for symbol in PERP_TICKERS:
+            is_safe, divergence = check_spread_corridor(symbol)
+            spread_info[symbol] = {'safe': is_safe, 'divergence': round(divergence * 100, 3)}
+        
         # Console output
         log("-" * 50)
-        log(f"STATUS | Balance: ${balance:.2f} | Positions: {len(live_positions)} | Pending: {len(pending_orders)}")
+        halt_status = f" | ⚠️ HALTED: {halt_reason}" if trading_halted else ""
+        log(f"STATUS | Balance: ${balance:.2f} | Positions: {len(live_positions)} | Pending: {len(pending_orders)}{halt_status}")
         log(f"  BTC: ${btc_spot:,.0f} | ETH: ${eth_spot:,.0f}")
         
         for symbol, info in vwap_info.items():
             if info['vwap'] > 0:
-                log(f"  {symbol} VWAP: ${info['vwap']:,.0f} | ±2σ: ${info['lower_band']:,.0f}-${info['upper_band']:,.0f} | Dev: {info['deviation_sd']:.1f}σ {info['direction']}")
+                adx_str = f" | ADX: {adx_info.get(symbol, {}).get('value', 'N/A')}" if symbol in adx_info else ""
+                spread_str = f" | Spread: {spread_info.get(symbol, {}).get('divergence', 0):.3f}%"
+                log(f"  {symbol} VWAP: ${info['vwap']:,.0f} | ±2σ: ${info['lower_band']:,.0f}-${info['upper_band']:,.0f} | Dev: {info['deviation_sd']:.1f}σ {info['direction']}{adx_str}{spread_str}")
         
         for symbol, cvd in cvd_info.items():
             log(f"  {symbol} CVD: {cvd['value']:+.1f} ({cvd['trend']})")
@@ -1550,6 +1846,10 @@ def seed_vwap_from_history():
             if symbol not in cvd_states:
                 cvd_states[symbol] = CVDState()
             
+            # Initialize ADX state
+            if symbol not in adx_states:
+                adx_states[symbol] = ADXState(period=ADX_PERIOD)
+            
             # Coinbase candles format: [timestamp, low, high, open, close, volume]
             # They come newest first, so reverse for chronological order
             candles_added = 0
@@ -1586,6 +1886,9 @@ def seed_vwap_from_history():
                 vwap_states[symbol].candles.append(candle)
                 candles_added += 1
                 
+                # Update ADX with historical candle
+                adx_states[symbol].add_candle(high, low, close)
+                
                 # Update price history
                 if symbol not in price_history:
                     price_history[symbol] = deque(maxlen=100)
@@ -1603,7 +1906,8 @@ def seed_vwap_from_history():
             vwap = vwap_states[symbol].vwap
             lower, _, upper = vwap_states[symbol].get_bands(STD_DEV_MULTIPLIER)
             std = vwap_states[symbol].std_dev
-            log(f"  {symbol}: {candles_added} candles, VWAP: ${vwap:,.2f}, ±2σ: ${lower:,.2f}-${upper:,.2f}")
+            adx = adx_states[symbol].get_adx() if adx_states[symbol].is_valid() else 0.0
+            log(f"  {symbol}: {candles_added} candles, VWAP: ${vwap:,.2f}, ±2σ: ${lower:,.2f}-${upper:,.2f}, ADX: {adx:.1f}")
             
         except Exception as e:
             log(f"  {symbol}: Error seeding - {e}")
