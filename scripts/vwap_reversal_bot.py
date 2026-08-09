@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kalshi Perps VWAP Reversal Bot v2.7
+Kalshi Perps VWAP Reversal Bot v2.7.1
 
 Strategy:
 - VWAP with configurable σ bands (default ±2σ)
@@ -100,6 +100,12 @@ if DRY_RUN:
 # WebSocket URLs
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 COINBASE_WS_URL = "wss://advanced-trade-ws.coinbase.com"
+
+# API credentials (from env)
+API_KEY = os.getenv('KALSHI_API_KEY_ID')
+KEY_PATH = os.getenv('KALSHI_KEY_PATH', 'keys/kalshi_private.pem')
+if not Path(KEY_PATH).is_absolute():
+    KEY_PATH = Path(__file__).parent.parent / KEY_PATH
 
 # Build asset mappings from config
 PERP_TICKERS = {sym: asset.kalshi_ticker for sym, asset in cfg.assets.items() if asset.enabled}
@@ -395,48 +401,48 @@ class BotState:
     """Encapsulates all mutable bot state for cleaner testing and lifecycle."""
     
     # WebSocket connection state
-    state.ws_connected: Dict[str, bool] = field(default_factory=lambda: {'kalshi': False, 'coinbase': False})
-    state.ws_last_message: Dict[str, float] = field(default_factory=lambda: {'kalshi': 0.0, 'coinbase': 0.0})
+    ws_connected: Dict[str, bool] = field(default_factory=lambda: {'kalshi': False, 'coinbase': False})
+    ws_last_message: Dict[str, float] = field(default_factory=lambda: {'kalshi': 0.0, 'coinbase': 0.0})
     
     # Per-symbol indicator state
-    state.vwap_states: Dict[str, VWAPState] = field(default_factory=dict)
-    state.cvd_states: Dict[str, CVDState] = field(default_factory=dict)
-    state.adx_states: Dict[str, ADXState] = field(default_factory=dict)
+    vwap_states: Dict[str, VWAPState] = field(default_factory=dict)
+    cvd_states: Dict[str, CVDState] = field(default_factory=dict)
+    adx_states: Dict[str, ADXState] = field(default_factory=dict)
     
     # Price history - COINBASE ONLY for swing detection (clean data source)
-    state.coinbase_price_history: Dict[str, deque] = field(default_factory=dict)
+    coinbase_price_history: Dict[str, deque] = field(default_factory=dict)
     
     # Cross-venue price tracking for spread corridor
-    state.kalshi_prices: Dict[str, float] = field(default_factory=dict)
-    state.coinbase_prices: Dict[str, float] = field(default_factory=dict)
+    kalshi_prices: Dict[str, float] = field(default_factory=dict)
+    coinbase_prices: Dict[str, float] = field(default_factory=dict)
     
     # Trading halt state
-    state.trading_halted: bool = False
-    state.halt_reason: str = ""
+    trading_halted: bool = False
+    halt_reason: str = ""
     
     # ADX Hysteresis state (prevents flapping at threshold boundary)
-    state.adx_trend_blocked: Dict[str, bool] = field(default_factory=dict)
+    adx_trend_blocked: Dict[str, bool] = field(default_factory=dict)
     
     # Circuit breaker state
-    state.consecutive_losses: int = 0
-    state.circuit_breaker_tripped: bool = False
+    consecutive_losses: int = 0
+    circuit_breaker_tripped: bool = False
     
     # Exit targets - stored locally for each position (by ticker)
-    state.exit_targets: Dict[str, dict] = field(default_factory=dict)
+    exit_targets: Dict[str, dict] = field(default_factory=dict)
     
     # Pending orders - track unfilled orders
-    state.pending_orders: Dict[str, dict] = field(default_factory=dict)
+    pending_orders: Dict[str, dict] = field(default_factory=dict)
     
     # Rate limiting
-    state.trades_this_hour: int = 0
-    state.last_hour: int = field(default_factory=lambda: datetime.now().hour)
+    trades_this_hour: int = 0
+    last_hour: int = field(default_factory=lambda: datetime.now().hour)
     
     # Session PnL tracking
-    state.total_pnl: float = 0.0
+    total_pnl: float = 0.0
     
     # Status logging
-    state.last_status_log: float = 0.0
-    state.last_state_save: float = 0.0
+    last_status_log: float = 0.0
+    last_state_save: float = 0.0
 
 
 # Global bot state instance
@@ -576,7 +582,8 @@ def handle_kalshi_message(data: dict):
 async def coinbase_websocket():
     """Coinbase Advanced Trade WebSocket for live market data with exponential backoff."""
     
-    products = ['BTC-USD', 'ETH-USD']
+    # Use config-driven product list
+    products = COINBASE_PRODUCTS
     reconnect_delay = 1.0  # Start with 1 second
     max_delay = 60.0  # Cap at 60 seconds
     
@@ -714,15 +721,26 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
     # Get CVD trend with configurable strictness
     cvd_trend = cvd_state.get_cvd_trend()
     
+    # Check minimum CVD delta if configured
+    cvd_delta_ok = True
+    if cfg.cvd_min_delta_pct > 0:
+        # Get CVD change over window
+        cvd_now = cvd_state.running_cvd
+        cvd_start, _ = cvd_state.get_cvd_at(cfg.cvd_divergence_window_minutes)
+        cvd_change = abs(cvd_now - cvd_start)
+        cvd_base = max(abs(cvd_now), abs(cvd_start), 1.0)  # Avoid div by zero
+        cvd_delta_pct = cvd_change / cvd_base
+        cvd_delta_ok = cvd_delta_pct >= cfg.cvd_min_delta_pct
+    
     # Determine acceptable CVD trends based on config
     if cfg.cvd_strict_divergence:
         # Strict mode: require clear directional divergence (no 'flat')
-        short_cvd_ok = cvd_trend == 'falling'
-        long_cvd_ok = cvd_trend == 'rising'
+        short_cvd_ok = cvd_trend == 'falling' and cvd_delta_ok
+        long_cvd_ok = cvd_trend == 'rising' and cvd_delta_ok
     else:
         # Default: accept flat as "not confirming the move"
-        short_cvd_ok = cvd_trend in ('falling', 'flat')
-        long_cvd_ok = cvd_trend in ('rising', 'flat')
+        short_cvd_ok = cvd_trend in ('falling', 'flat') and cvd_delta_ok
+        long_cvd_ok = cvd_trend in ('rising', 'flat') and cvd_delta_ok
     
     # SHORT SIGNAL: Price > VWAP + 2σ AND CVD falling (or flat if not strict)
     if current_price >= upper_band:
@@ -1231,23 +1249,36 @@ async def manage_positions(client: KalshiClient):
         
         # Get or create exit targets for this position
         if ticker not in state.exit_targets:
-            # New position - calculate exit targets
+            # New position - calculate exit targets using consistent formula
             vwap = state.vwap_states[symbol].vwap if symbol in state.vwap_states else entry_price
             
-            if side == 'long':
-                stop_loss = entry_price * 0.98  # 2% below entry
-                target_price = vwap
+            # Use swing-based stops if we have price history, otherwise fallback
+            if symbol in state.coinbase_price_history and len(state.coinbase_price_history[symbol]) >= 5:
+                recent_prices = list(state.coinbase_price_history[symbol])[-20:]
+                if side == 'long':
+                    swing_low = min(p['price'] for p in recent_prices)
+                    stop_loss = swing_low * (1 - STOP_LOSS_BEYOND_WICK_PCT)
+                    min_stop = entry_price * (1 - MIN_STOP_DISTANCE_PCT)
+                    stop_loss = min(stop_loss, min_stop)
+                else:
+                    swing_high = max(p['price'] for p in recent_prices)
+                    stop_loss = swing_high * (1 + STOP_LOSS_BEYOND_WICK_PCT)
+                    min_stop = entry_price * (1 + MIN_STOP_DISTANCE_PCT)
+                    stop_loss = max(stop_loss, min_stop)
             else:
-                stop_loss = entry_price * 1.02  # 2% above entry
-                target_price = vwap
+                # Fallback: use minimum stop distance from config
+                if side == 'long':
+                    stop_loss = entry_price * (1 - max(MIN_STOP_DISTANCE_PCT, 0.02))
+                else:
+                    stop_loss = entry_price * (1 + max(MIN_STOP_DISTANCE_PCT, 0.02))
             
             state.exit_targets[ticker] = {
                 'stop_loss': stop_loss,
-                'target_price': target_price,
+                'target_price': vwap,
                 'side': side,
                 'entry_price': entry_price
             }
-            log(f"[POSITION] New exit targets for {symbol} {side.upper()}: Stop ${stop_loss:,.2f}, Target ${target_price:,.2f}")
+            log(f"[POSITION] New exit targets for {symbol} {side.upper()}: Stop ${stop_loss:,.2f}, Target ${vwap:,.2f}")
         
         targets = state.exit_targets[ticker]
         stop_loss = targets['stop_loss']
@@ -1531,15 +1562,15 @@ def recover_state():
     log(f"[STATE] Found saved state from {saved.get('saved_at_iso', 'unknown')}")
     
     # Recover exit targets (not positions - those come from Kalshi API)
-    for ticker, target_data in saved.get('state.exit_targets', {}).items():
+    for ticker, target_data in saved.get('exit_targets', {}).items():
         state.exit_targets[ticker] = target_data
         log(f"[STATE] Recovered exit targets for {ticker}")
     
     # Note: VWAP and positions come from live sources
     log(f"[STATE] VWAP will be seeded fresh, positions from Kalshi API")
     
-    state.trades_this_hour = saved.get('state.trades_this_hour', 0)
-    state.total_pnl = saved.get('state.total_pnl', 0.0)
+    state.trades_this_hour = saved.get('trades_this_hour', 0)
+    state.total_pnl = saved.get('total_pnl', 0.0)
     
     log(f"[STATE] Recovery complete: {len(state.exit_targets)} exit targets, PnL: ${state.total_pnl:+,.2f}")
 

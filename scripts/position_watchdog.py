@@ -116,12 +116,8 @@ def check_position_health(position: dict, current_price: float, exit_targets: di
     """
     ticker = position['ticker']
     side = position['side']
-    entry_price = contract_to_spot_price(
-        position['ticker'].replace('KXPERP', '').replace('KX', ''),
-        position['entry_price']
-    )
     
-    # Find symbol from ticker
+    # Find symbol from ticker first
     symbol = None
     for sym, tick in PERP_TICKERS.items():
         if tick == ticker:
@@ -130,6 +126,9 @@ def check_position_health(position: dict, current_price: float, exit_targets: di
     
     if not symbol:
         return (False, "Unknown ticker", 0)
+    
+    # Now convert entry price using the correct symbol
+    entry_price = contract_to_spot_price(symbol, position['entry_price'])
     
     # Calculate current PnL
     if side == 'long':
