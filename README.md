@@ -32,10 +32,12 @@ Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow
 
 | Gate | Check | Threshold |
 |------|-------|-----------|
+| 0. Data Freshness | WebSocket lag | < 1.0s both feeds |
 | 1. Fee Hurdle | Profit distance > fees + margin | > 0.145% (0.045% fees + 0.1% profit) |
 | 2. Spread Corridor | \|Kalshi - Coinbase\| | < 0.15% |
-| 3. ADX Filter | Trend strength | ADX(14) < 25 |
+| 3. ADX Filter | Trend strength with hysteresis | Block at ≥25, unlock at <22 |
 | 4. OBI Confirmation | Order book imbalance | ±0.20 supporting direction |
+| 5. Circuit Breaker | Consecutive stop-losses | < 3 losses in a row |
 
 ### Exit
 - **Target**: VWAP (single exit, no partial scaling)

@@ -33,12 +33,15 @@
     },
     
     "safety_gates": {
+        "data_freshness_max_lag_seconds": 1.0,
         "fee_hurdle_min_profit_pct": 0.001,
         "spread_corridor_max_pct": 0.0015,
         "adx_period": 14,
         "adx_trend_threshold": 25,
+        "adx_cooldown_threshold": 22,
         "obi_min_threshold": 0.20,
-        "obi_depth_levels": 5
+        "obi_depth_levels": 5,
+        "circuit_breaker_consecutive_losses": 3
     },
     
     "fees": {

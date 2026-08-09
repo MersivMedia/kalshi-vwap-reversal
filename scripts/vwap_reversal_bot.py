@@ -93,10 +93,17 @@ SPREAD_CORRIDOR_MAX_PCT = 0.0015  # 0.15% max divergence before halting
 # ADX Trend Filter: Don't fade bands during strong trends
 ADX_PERIOD = 14
 ADX_TREND_THRESHOLD = 25  # ADX > 25 = trending market, skip mean reversion
+ADX_COOLDOWN_THRESHOLD = 22  # ADX must drop below 22 to re-enable after blocking
 
 # Order Book Imbalance (OBI): Confirm passive flow supports trade direction
 OBI_MIN_THRESHOLD = 0.20  # Require +0.20 OBI for longs, -0.20 for shorts
 OBI_DEPTH_LEVELS = 5  # Use top 5 levels of orderbook
+
+# Data Freshness: Reject signals if websocket data is stale
+MAX_DATA_LAG_SECONDS = 1.0  # Max 1 second lag before halting
+
+# Circuit Breaker: Stop trading after consecutive losses
+CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 3  # Shutdown after 3 consecutive stops
 
 # Risk Management
 MAX_RISK_PER_TRADE_PCT = 0.30  # 30% max risk (aggressive for small account)
@@ -461,9 +468,34 @@ class ADXState:
 # SAFETY GATES
 # ============================================================
 
+def check_data_freshness() -> Tuple[bool, str]:
+    """
+    Gate 0: Ensure websocket data is fresh.
+    Prevents trading on stale data during network issues.
+    
+    Returns (is_fresh, lag_info).
+    """
+    current_time = time.time()
+    
+    cb_lag = current_time - ws_last_message.get('coinbase', 0)
+    kalshi_lag = current_time - ws_last_message.get('kalshi', 0)
+    
+    # If we've never received a message, allow (startup grace period)
+    if ws_last_message.get('coinbase', 0) == 0 or ws_last_message.get('kalshi', 0) == 0:
+        return (True, "Startup grace period")
+    
+    if cb_lag > MAX_DATA_LAG_SECONDS:
+        return (False, f"Coinbase data stale: {cb_lag:.2f}s lag")
+    
+    if kalshi_lag > MAX_DATA_LAG_SECONDS:
+        return (False, f"Kalshi data stale: {kalshi_lag:.2f}s lag")
+    
+    return (True, f"Data fresh (CB: {cb_lag:.2f}s, Kalshi: {kalshi_lag:.2f}s)")
+
+
 def check_spread_corridor(symbol: str) -> Tuple[bool, float]:
     """
-    Check if Kalshi and Coinbase prices are within acceptable divergence.
+    Gate 2: Check if Kalshi and Coinbase prices are within acceptable divergence.
     Returns (is_safe, divergence_pct).
     
     If divergence > SPREAD_CORRIDOR_MAX_PCT, trading should halt.
@@ -478,6 +510,41 @@ def check_spread_corridor(symbol: str) -> Tuple[bool, float]:
     is_safe = divergence <= SPREAD_CORRIDOR_MAX_PCT
     
     return (is_safe, divergence)
+
+
+def check_adx_hysteresis(symbol: str) -> Tuple[bool, str]:
+    """
+    Gate 3: ADX trend filter with hysteresis to prevent flapping.
+    
+    - Block when ADX >= 25 (trend detected)
+    - Stay blocked until ADX < 22 (trend must cool down significantly)
+    
+    This prevents rapid on/off switching at the threshold boundary.
+    """
+    global adx_trend_blocked
+    
+    if symbol not in adx_states or not adx_states[symbol].is_valid():
+        return (True, "ADX not ready")
+    
+    adx = adx_states[symbol].get_adx()
+    is_blocked = adx_trend_blocked.get(symbol, False)
+    
+    if is_blocked:
+        # Currently blocked - need ADX to cool down below 22 to unblock
+        if adx < ADX_COOLDOWN_THRESHOLD:
+            adx_trend_blocked[symbol] = False
+            log(f"🔄 {symbol} ADX cooled to {adx:.1f} - mean-reversion unlocked")
+            return (True, f"ADX cooled: {adx:.1f} < {ADX_COOLDOWN_THRESHOLD}")
+        else:
+            return (False, f"ADX still trending: {adx:.1f} (needs < {ADX_COOLDOWN_THRESHOLD} to unlock)")
+    else:
+        # Not blocked - check if we should block
+        if adx >= ADX_TREND_THRESHOLD:
+            adx_trend_blocked[symbol] = True
+            log(f"🚫 {symbol} ADX trending at {adx:.1f} - mean-reversion blocked")
+            return (False, f"ADX trending: {adx:.1f} >= {ADX_TREND_THRESHOLD}")
+        else:
+            return (True, f"ADX ranging: {adx:.1f}")
 
 
 def calculate_obi(client, ticker: str) -> float:
@@ -515,20 +582,50 @@ def calculate_obi(client, ticker: str) -> float:
         return 0.0
 
 
+def check_circuit_breaker() -> Tuple[bool, str]:
+    """
+    Gate 5: Circuit breaker - halt trading after consecutive losses.
+    Prevents catastrophic drawdown during adverse conditions.
+    """
+    global circuit_breaker_tripped
+    
+    if circuit_breaker_tripped:
+        return (False, f"Circuit breaker TRIPPED: {consecutive_losses} consecutive losses")
+    
+    if consecutive_losses >= CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
+        circuit_breaker_tripped = True
+        log(f"🚨 CIRCUIT BREAKER TRIPPED: {consecutive_losses} consecutive stop-losses!")
+        return (False, f"Circuit breaker triggered: {consecutive_losses} consecutive losses")
+    
+    return (True, f"Circuit breaker OK ({consecutive_losses} consecutive losses)")
+
+
 def validate_entry_gates(client, symbol: str, side: str, entry_price: float, target_price: float) -> Tuple[bool, str]:
     """
     Run all safety gates before allowing entry.
     Returns (can_enter, reason).
     
     Gates:
+    0. Data freshness (websocket lag < 1s)
     1. Fee hurdle (profit > fees + margin)
     2. Spread corridor (Kalshi/Coinbase alignment)
-    3. ADX trend filter (no fading strong trends)
+    3. ADX trend filter with hysteresis
     4. OBI confirmation (orderbook supports direction)
+    5. Circuit breaker (consecutive losses)
     """
     global trading_halted, halt_reason
     
     ticker = PERP_TICKERS[symbol]
+    
+    # Gate 0: Data Freshness
+    is_fresh, freshness_info = check_data_freshness()
+    if not is_fresh:
+        return (False, f"Data stale: {freshness_info}")
+    
+    # Gate 5: Circuit Breaker (check early to fail fast)
+    cb_ok, cb_info = check_circuit_breaker()
+    if not cb_ok:
+        return (False, cb_info)
     
     # Gate 1: Fee Hurdle
     profit_distance = abs(entry_price - target_price)
@@ -547,12 +644,10 @@ def validate_entry_gates(client, symbol: str, side: str, entry_price: float, tar
         trading_halted = False
         halt_reason = ""
     
-    # Gate 3: ADX Trend Filter
-    adx_value = 0.0
-    if symbol in adx_states and adx_states[symbol].is_valid():
-        adx_value = adx_states[symbol].get_adx()
-        if adx_value > ADX_TREND_THRESHOLD:
-            return (False, f"ADX trending: {adx_value:.1f} > {ADX_TREND_THRESHOLD} threshold")
+    # Gate 3: ADX Trend Filter with Hysteresis
+    adx_ok, adx_info = check_adx_hysteresis(symbol)
+    if not adx_ok:
+        return (False, adx_info)
     
     # Gate 4: OBI Confirmation
     obi = calculate_obi(client, ticker)
@@ -562,6 +657,8 @@ def validate_entry_gates(client, symbol: str, side: str, entry_price: float, tar
     elif side == 'short' and obi > -OBI_MIN_THRESHOLD:
         return (False, f"OBI unsupportive for short: {obi:+.2f} > -{OBI_MIN_THRESHOLD}")
     
+    # All gates passed
+    adx_value = adx_states[symbol].get_adx() if symbol in adx_states and adx_states[symbol].is_valid() else 0.0
     return (True, f"All gates passed (OBI: {obi:+.2f}, ADX: {adx_value:.1f})")
 
 
@@ -585,6 +682,13 @@ coinbase_prices: Dict[str, float] = {} # Latest Coinbase spot prices
 # Trading halted flag (spread corridor breach)
 trading_halted: bool = False
 halt_reason: str = ""
+
+# ADX Hysteresis state (prevents flapping at threshold boundary)
+adx_trend_blocked: Dict[str, bool] = {}  # Per-symbol trend block state
+
+# Circuit breaker state
+consecutive_losses: int = 0
+circuit_breaker_tripped: bool = False
 
 # Exit targets - stored locally for each position (by ticker)
 # Format: {ticker: {'stop_loss': float, 'target_price': float, 'side': str, 'entry_price': float}}
@@ -795,8 +899,11 @@ class KalshiClient:
 # ============================================================
 
 async def kalshi_websocket():
-    """Kalshi WebSocket for real-time perp data."""
+    """Kalshi WebSocket for real-time perp data with exponential backoff."""
     global ws_connected
+    
+    reconnect_delay = 1.0  # Start with 1 second
+    max_delay = 60.0  # Cap at 60 seconds
     
     while True:
         try:
@@ -822,8 +929,9 @@ async def kalshi_websocket():
             }
             
             log("[KALSHI WS] Connecting...")
-            async with websockets.connect(KALSHI_WS_URL, extra_headers=headers) as ws:
+            async with websockets.connect(KALSHI_WS_URL, extra_headers=headers, ping_interval=20, ping_timeout=10) as ws:
                 ws_connected['kalshi'] = True
+                reconnect_delay = 1.0  # Reset on successful connection
                 log("[KALSHI WS] Connected!")
                 
                 # Subscribe to ticker and trades
@@ -843,11 +951,15 @@ async def kalshi_websocket():
                         handle_kalshi_message(data)
                     except json.JSONDecodeError:
                         pass
-                        
+        
+        except asyncio.CancelledError:
+            log("[KALSHI WS] Cancelled, shutting down...")
+            break
         except Exception as e:
             ws_connected['kalshi'] = False
-            log(f"[KALSHI WS] Error: {e}, reconnecting...")
-            await asyncio.sleep(2)
+            log(f"[KALSHI WS] Error: {e}, reconnecting in {reconnect_delay:.1f}s...")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_delay)  # Exponential backoff
 
 
 def handle_kalshi_message(data: dict):
@@ -899,16 +1011,19 @@ def handle_kalshi_message(data: dict):
 
 
 async def coinbase_websocket():
-    """Coinbase Advanced Trade WebSocket for live market data."""
+    """Coinbase Advanced Trade WebSocket for live market data with exponential backoff."""
     global ws_connected
     
     products = ['BTC-USD', 'ETH-USD']
+    reconnect_delay = 1.0  # Start with 1 second
+    max_delay = 60.0  # Cap at 60 seconds
     
     while True:
         try:
             log("[COINBASE WS] Connecting...")
-            async with websockets.connect(COINBASE_WS_URL) as ws:
+            async with websockets.connect(COINBASE_WS_URL, ping_interval=20, ping_timeout=10) as ws:
                 ws_connected['coinbase'] = True
+                reconnect_delay = 1.0  # Reset on successful connection
                 log("[COINBASE WS] Connected!")
                 
                 # Advanced Trade API subscribe format
@@ -926,10 +1041,14 @@ async def coinbase_websocket():
                     except json.JSONDecodeError:
                         pass
                         
+        except asyncio.CancelledError:
+            log("[COINBASE WS] Cancelled, shutting down...")
+            break
         except Exception as e:
             ws_connected['coinbase'] = False
-            log(f"[COINBASE WS] Error: {e}, reconnecting...")
-            await asyncio.sleep(2)
+            log(f"[COINBASE WS] Error: {e}, reconnecting in {reconnect_delay:.1f}s...")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, max_delay)  # Exponential backoff
 
 
 def handle_coinbase_message(data: dict):
@@ -1241,7 +1360,7 @@ async def execute_entry(client: KalshiClient, signal: dict):
     log(f"  Contracts: {contracts}")
     log(f"  Contract price: ${contract_price:.4f}")
     
-    # Place order
+    # Place order (with post_only for maker fees)
     result = client.place_order(
         ticker, 
         signal['side'], 
@@ -1249,6 +1368,35 @@ async def execute_entry(client: KalshiClient, signal: dict):
         contract_price,
         reduce_only=False
     )
+    
+    # Check for post_only rejection (order would cross spread)
+    if result.get('error') or result.get('status') == 'rejected':
+        error_msg = result.get('error', result.get('reason', 'unknown'))
+        
+        # Handle post_only rejection specifically
+        if 'post_only' in str(error_msg).lower() or 'cross' in str(error_msg).lower():
+            log(f"  ⚠️ POST_ONLY REJECTED: Order would cross spread. State reset.")
+            log_trade({
+                'type': 'post_only_rejected',
+                'symbol': symbol,
+                'side': signal['side'],
+                'reason': error_msg,
+                'entry_price': signal['entry_price']
+            })
+        else:
+            log(f"  ❌ Order failed: {error_msg}")
+            log_trade({
+                'type': 'order_failed',
+                'symbol': symbol,
+                'side': signal['side'],
+                'reason': error_msg,
+                'entry_price': signal['entry_price']
+            })
+        
+        # Ensure clean state - no phantom pending orders
+        if symbol in pending_orders:
+            del pending_orders[symbol]
+        return
     
     if result.get('order') or result.get('order_id'):
         order_id = result.get('order_id', result.get('order', {}).get('order_id', 'unknown'))
@@ -1278,6 +1426,11 @@ async def execute_entry(client: KalshiClient, signal: dict):
         })
     else:
         log(f"  ❌ Order failed: {result}")
+        log_trade({
+            'type': 'order_failed',
+            'symbol': symbol,
+            'reason': str(result)
+        })
 
 
 async def manage_pending_orders(client: KalshiClient):
@@ -1581,6 +1734,21 @@ async def manage_positions(client: KalshiClient):
                 log(f"  Exit contracts: {contracts}")
                 log(f"  PnL: ${pnl:+,.2f}")
                 
+                # === CIRCUIT BREAKER: Track consecutive losses ===
+                global consecutive_losses
+                is_stop_loss = "STOP LOSS" in exit_reason
+                
+                if is_stop_loss:
+                    consecutive_losses += 1
+                    log(f"  ⚠️ Consecutive losses: {consecutive_losses}/{CIRCUIT_BREAKER_CONSECUTIVE_LOSSES}")
+                    if consecutive_losses >= CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
+                        log(f"  🚨 CIRCUIT BREAKER will trip on next signal check!")
+                else:
+                    # Win - reset consecutive loss counter
+                    if consecutive_losses > 0:
+                        log(f"  ✅ Win! Resetting consecutive loss counter (was {consecutive_losses})")
+                    consecutive_losses = 0
+                
                 # Remove exit targets
                 del exit_targets[ticker]
                 
@@ -1590,7 +1758,9 @@ async def manage_positions(client: KalshiClient):
                     'reason': exit_reason,
                     'exit_price': current_price,
                     'contracts': contracts,
-                    'pnl': pnl
+                    'pnl': pnl,
+                    'consecutive_losses': consecutive_losses,
+                    'is_stop_loss': is_stop_loss
                 })
             else:
                 log(f"  ❌ Exit failed: {result}")
