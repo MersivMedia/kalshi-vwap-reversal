@@ -2,17 +2,31 @@
     "version": "2.0.0",
     
     "assets": {
+        "NEAR": {
+            "kalshi_ticker": "KXNEARPERP",
+            "coinbase_symbol": "NEAR-USD",
+            "enabled": true,
+            "size_multiplier": 1.0,
+            "contract_size": 0.1
+        },
+        "SUI": {
+            "kalshi_ticker": "KXSUIPERP", 
+            "coinbase_symbol": "SUI-USD",
+            "enabled": true,
+            "size_multiplier": 1.0,
+            "contract_size": 0.1
+        },
         "BTC": {
             "kalshi_ticker": "KXBTCPERP",
             "coinbase_symbol": "BTC-USD",
-            "enabled": true,
+            "enabled": false,
             "size_multiplier": 1.0,
             "contract_size": 0.0001
         },
         "ETH": {
             "kalshi_ticker": "KXETHPERP", 
             "coinbase_symbol": "ETH-USD",
-            "enabled": true,
+            "enabled": false,
             "size_multiplier": 1.0,
             "contract_size": 0.001
         }
