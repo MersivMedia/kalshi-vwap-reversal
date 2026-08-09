@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kalshi Perps VWAP Reversal Bot v2.7.5
+Kalshi Perps VWAP Reversal Bot v2.7.6
 
 Strategy:
 - VWAP with configurable σ bands (default ±2σ)
@@ -1783,7 +1783,7 @@ async def main():
     log(f"Assets: {list(PERP_TICKERS.keys())}")
     log(f"Entry: ±{STD_DEV_MULTIPLIER}σ bands | Session VWAP (resets 00:00 UTC)")
     log(f"Max margin: {cfg.max_margin_pct*100:.0f}% | Max risk: {cfg.max_risk_per_trade_pct*100:.0f}%")
-    log(f"Target: VWAP | Stop: Swing ±0.1%")
+    log(f"Target: VWAP | Stop: Swing ±{cfg.stop_beyond_wick_pct*100:.1f}%")
     log("=" * 60)
     
     # Recover state from previous run

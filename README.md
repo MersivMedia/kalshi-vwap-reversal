@@ -1,4 +1,4 @@
-# Kalshi Perps VWAP Reversal Bot v2.7.5
+# Kalshi Perps VWAP Reversal Bot v2.7.6
 
 Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow confirmation, and multi-layer safety gates.
 
@@ -13,6 +13,11 @@ Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow
          -2σ ───────────────────────  Entry zone for longs
          -3σ ═══════════════════════  EXTREME OVERSOLD (long zone)
 ```
+
+**v2.7.6 Polish:**
+- Banner stop text uses `cfg.stop_beyond_wick_pct`
+- **35 tests total**: added integration tests with mocks
+- Project structure documented in README
 
 **v2.7.5 Polish:**
 - CONTRACT_SIZES now config-driven (`asset.contract_size`)
@@ -48,6 +53,32 @@ Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow
 - **Coinbase-only price history** — Swing detection uses only Coinbase data (no venue mixing)
 - **Graceful shutdown** — Signal handlers save state and cancel tasks cleanly
 - **Removed dead code** — Unused `detect_price_extreme` function removed
+
+## Project Structure
+
+```
+kalshi-vwap-reversal/
+├── scripts/
+│   ├── vwap_reversal_bot.py   # Main bot (entry, exits, WS, trading loop)
+│   ├── config.py              # Configuration loader (config.json → dataclass)
+│   ├── indicators.py          # VWAP, CVD, ADX calculations
+│   ├── kalshi_client.py       # Sync REST client with rate limiting
+│   ├── kalshi_async.py        # Async REST client (available, run_sync used)
+│   ├── state_manager.py       # State persistence (exit targets, PnL)
+│   ├── notifier.py            # Telegram notifications
+│   └── position_watchdog.py   # Independent safety monitor
+├── tests/
+│   ├── test_indicators.py     # VWAP, CVD, ADX unit tests
+│   ├── test_config.py         # Config loading tests
+│   ├── test_gates.py          # Safety gate tests
+│   ├── test_exits.py          # Exit confirmation, PnL booking tests
+│   ├── test_signals.py        # Signal generation tests
+│   └── test_integration.py    # Integration tests with mocks
+├── config.json                # Bot configuration
+├── vwap-bot.service           # systemd service (main bot)
+├── vwap-watchdog.service      # systemd service (watchdog)
+└── README.md
+```
 
 **v2.6 Changes:**
 - **Non-blocking async I/O** — All Kalshi API calls now run in thread pool, event loop no longer blocked
