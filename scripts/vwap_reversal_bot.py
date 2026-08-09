@@ -1234,29 +1234,33 @@ async def manage_positions(client: KalshiClient):
         if ticker not in live_tickers:
             targets = state.exit_targets[ticker]
             
-            # If exit was pending, now we can confirm it and calculate realized PnL
-            if targets.get('exit_pending') and targets.get('balance_before_exit') is not None:
+            # If exit was pending, now we can confirm it and book PnL
+            if targets.get('exit_pending') and targets.get('position_pnl') is not None:
                 symbol = targets.get('symbol', ticker)
-                balance_before = targets['balance_before_exit']
+                position_pnl = targets['position_pnl']  # Position-specific, no multi-position contamination
+                equity_before = targets.get('equity_before', 0)
                 exit_reason = targets.get('exit_reason', 'unknown')
                 side = targets.get('side', 'unknown')
                 exit_price = targets.get('exit_price', 0)
                 
-                # Get current equity to calculate REALIZED PnL
-                balance_after = await run_sync(client.get_equity)
-                pnl = balance_after - balance_before
+                # Get current equity for sanity check (not used for PnL)
+                equity_after = await run_sync(client.get_equity)
+                equity_delta = equity_after - equity_before
+                
+                # Use position-specific PnL (avoids contamination from other positions)
+                pnl = position_pnl
                 
                 log(f"[POSITION] Exit confirmed for {symbol}")
-                log(f"  Equity: ${balance_before:,.2f} → ${balance_after:,.2f}")
-                log(f"  Realized PnL: ${pnl:+,.2f}")
+                log(f"  Realized PnL: ${pnl:+,.2f} (position-specific)")
+                log(f"  Equity check: ${equity_before:,.2f} → ${equity_after:,.2f} (Δ${equity_delta:+,.2f})")
                 
                 # === NOW book PnL ===
                 state.total_pnl += pnl
                 log(f"  Total session PnL: ${state.total_pnl:+,.2f}")
                 
-                # === NOW update circuit breaker ===
-                is_stop_loss = "STOP LOSS" in exit_reason
-                if is_stop_loss:
+                # === NOW update circuit breaker (based on actual PnL, not reason text) ===
+                is_loss = pnl < 0
+                if is_loss:
                     state.consecutive_losses += 1
                     log(f"  ⚠️ Consecutive losses: {state.consecutive_losses}/{CIRCUIT_BREAKER_CONSECUTIVE_LOSSES}")
                 else:
@@ -1279,11 +1283,12 @@ async def manage_positions(client: KalshiClient):
                     'symbol': symbol,
                     'reason': exit_reason,
                     'exit_price': exit_price,
-                    'equity_before': balance_before,
-                    'equity_after': balance_after,
-                    'realized_pnl': pnl,
+                    'position_pnl': pnl,
+                    'equity_before': equity_before,
+                    'equity_after': equity_after,
+                    'equity_delta': equity_delta,
                     'consecutive_losses': state.consecutive_losses,
-                    'is_stop_loss': is_stop_loss
+                    'is_loss': is_loss
                 })
             else:
                 log(f"[POSITION] Removing stale exit target for {ticker}")
@@ -1354,8 +1359,9 @@ async def manage_positions(client: KalshiClient):
         if targets.get('exit_pending'):
             age = time.time() - targets.get('exit_order_time', 0)
             if age > 60:  # If pending > 60s, position may have failed to close - retry
-                log(f"[POSITION] {symbol} exit pending > 60s, will retry")
+                log(f"[POSITION] {symbol} exit pending > 60s, will retry (keeping original equity snapshot)")
                 targets['exit_pending'] = False
+                # Keep original equity_before and position_pnl - don't re-snapshot
             else:
                 continue  # Skip, exit order already sent
         
@@ -1394,12 +1400,15 @@ async def manage_positions(client: KalshiClient):
             
             # DRY RUN: Log but don't place order
             if DRY_RUN:
-                log(f"  🔸 DRY RUN: Would exit with actual PnL ${kalshi_unrealized_pnl:+.2f} (from Kalshi)")
+                log(f"  🔸 DRY RUN: Would exit with PnL ${kalshi_unrealized_pnl:+.2f} (position unrealized)")
                 # Don't delete state.exit_targets in dry run so we can keep tracking
                 continue
             
-            # Capture total equity BEFORE exit for realized PnL calculation
-            balance_before_exit = await run_sync(client.get_equity)
+            # Capture equity BEFORE exit (only if not already set from prior retry)
+            # Also store position-specific unrealized_pnl as primary PnL (avoids multi-position contamination)
+            if 'equity_before' not in state.exit_targets[ticker]:
+                state.exit_targets[ticker]['equity_before'] = await run_sync(client.get_equity)
+                state.exit_targets[ticker]['position_pnl'] = kalshi_unrealized_pnl  # Position-specific
             
             # Place exit order (async to avoid blocking)
             exit_side = 'sell' if side == 'long' else 'buy'
@@ -1413,13 +1422,16 @@ async def manage_positions(client: KalshiClient):
             )
             
             if result.get('order') or result.get('order_id'):
-                log(f"  Exit order placed for {contracts} contracts")
-                log(f"  Equity before exit: ${balance_before_exit:,.2f} (will calc realized PnL after close)")
+                equity_before = state.exit_targets[ticker]['equity_before']
+                position_pnl = state.exit_targets[ticker]['position_pnl']
                 
-                # Store exit info on targets - will calc realized PnL when position confirmed closed
+                log(f"  Exit order placed for {contracts} contracts")
+                log(f"  Position PnL: ${position_pnl:+,.2f} (from Kalshi, position-specific)")
+                log(f"  Equity snapshot: ${equity_before:,.2f} (for sanity check)")
+                
+                # Mark exit pending
                 state.exit_targets[ticker]['exit_pending'] = True
                 state.exit_targets[ticker]['exit_order_time'] = time.time()
-                state.exit_targets[ticker]['balance_before_exit'] = balance_before_exit
                 state.exit_targets[ticker]['exit_reason'] = exit_reason
                 state.exit_targets[ticker]['exit_price'] = current_price
                 state.exit_targets[ticker]['symbol'] = symbol
@@ -1430,7 +1442,8 @@ async def manage_positions(client: KalshiClient):
                     'reason': exit_reason,
                     'exit_price': current_price,
                     'contracts': contracts,
-                    'equity_before': balance_before_exit
+                    'position_pnl': position_pnl,
+                    'equity_before': equity_before
                 })
             else:
                 log(f"  ❌ Exit failed: {result}")

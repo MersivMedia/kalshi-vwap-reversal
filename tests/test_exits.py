@@ -65,7 +65,8 @@ class TestExitTargets:
             'entry_price': 62000,
             'exit_pending': True,
             'exit_order_time': time.time(),
-            'exit_pnl': 50.0,
+            'position_pnl': 50.0,  # Position-specific PnL from Kalshi
+            'equity_before': 1000.0,  # Equity snapshot for sanity check
             'exit_reason': 'TARGET (VWAP)',
             'exit_price': 65000,
             'symbol': 'BTC'
@@ -111,7 +112,8 @@ class TestPnLBooking:
         expected_pnl = 150.0
         state.exit_targets['KXBTCPERP'] = {
             'exit_pending': True,
-            'exit_pnl': expected_pnl,
+            'position_pnl': expected_pnl,  # Position-specific from Kalshi
+            'equity_before': 1000.0,
             'exit_reason': 'TARGET (VWAP)',
         }
         
@@ -119,7 +121,7 @@ class TestPnLBooking:
         assert state.total_pnl == initial_pnl
         
         # PnL should be stored on targets
-        assert state.exit_targets['KXBTCPERP']['exit_pnl'] == expected_pnl
+        assert state.exit_targets['KXBTCPERP']['position_pnl'] == expected_pnl
     
     def test_pnl_booked_on_position_close(self):
         """PnL should be booked when position disappears from live positions."""
@@ -131,7 +133,8 @@ class TestPnLBooking:
         pnl = 200.0
         state.exit_targets['KXBTCPERP'] = {
             'exit_pending': True,
-            'exit_pnl': pnl,
+            'position_pnl': pnl,  # Position-specific from Kalshi
+            'equity_before': 1000.0,
             'exit_reason': 'TARGET (VWAP)',
             'exit_price': 65000,
             'symbol': 'BTC',
@@ -142,13 +145,13 @@ class TestPnLBooking:
         # This is what manage_positions does when ticker not in live_tickers
         targets = state.exit_targets['KXBTCPERP']
         
-        if targets.get('exit_pending') and targets.get('exit_pnl') is not None:
-            # Book PnL
-            state.total_pnl += targets['exit_pnl']
+        if targets.get('exit_pending') and targets.get('position_pnl') is not None:
+            # Book PnL (position-specific, no contamination)
+            state.total_pnl += targets['position_pnl']
             
-            # Update circuit breaker
-            is_stop_loss = "STOP LOSS" in targets.get('exit_reason', '')
-            if is_stop_loss:
+            # Update circuit breaker based on actual PnL, not reason text
+            is_loss = targets['position_pnl'] < 0
+            if is_loss:
                 state.consecutive_losses += 1
             else:
                 state.consecutive_losses = 0
@@ -161,49 +164,51 @@ class TestPnLBooking:
         assert state.consecutive_losses == 0  # Was a win
         assert 'KXBTCPERP' not in state.exit_targets
     
-    def test_stop_loss_increments_consecutive_losses(self):
-        """Stop loss exit should increment consecutive losses."""
+    def test_loss_increments_consecutive_losses(self):
+        """Losing trade (pnl < 0) should increment consecutive losses."""
         from vwap_reversal_bot import BotState
         
         state = BotState()
         state.consecutive_losses = 1
         
-        # Simulate stop loss exit
+        # Simulate losing exit (circuit breaker keys off pnl < 0, not reason text)
         targets = {
             'exit_pending': True,
-            'exit_pnl': -50.0,
+            'position_pnl': -50.0,
+            'equity_before': 1000.0,
             'exit_reason': 'STOP LOSS @ $58000',
             'symbol': 'BTC'
         }
         
         # Book it
-        state.total_pnl += targets['exit_pnl']
-        is_stop_loss = "STOP LOSS" in targets['exit_reason']
-        if is_stop_loss:
+        state.total_pnl += targets['position_pnl']
+        is_loss = targets['position_pnl'] < 0
+        if is_loss:
             state.consecutive_losses += 1
         
         assert state.total_pnl == -50.0
         assert state.consecutive_losses == 2
     
     def test_win_resets_consecutive_losses(self):
-        """Winning exit should reset consecutive losses."""
+        """Winning exit (pnl >= 0) should reset consecutive losses."""
         from vwap_reversal_bot import BotState
         
         state = BotState()
         state.consecutive_losses = 2
         
-        # Simulate target hit (win)
+        # Simulate profitable exit
         targets = {
             'exit_pending': True,
-            'exit_pnl': 100.0,
+            'position_pnl': 100.0,
+            'equity_before': 1000.0,
             'exit_reason': 'TARGET (VWAP) @ $65000',
             'symbol': 'BTC'
         }
         
         # Book it
-        state.total_pnl += targets['exit_pnl']
-        is_stop_loss = "STOP LOSS" in targets['exit_reason']
-        if not is_stop_loss:
+        state.total_pnl += targets['position_pnl']
+        is_loss = targets['position_pnl'] < 0
+        if not is_loss:
             state.consecutive_losses = 0
         
         assert state.total_pnl == 100.0

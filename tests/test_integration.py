@@ -153,24 +153,25 @@ class TestManagePositionsCleanup:
         initial_pnl = bot.state.total_pnl
         expected_pnl = 150.0
         
-        # Setup: exit was placed
+        # Setup: exit was placed with position-specific PnL
         bot.state.exit_targets['KXBTCPERP'] = {
             'exit_pending': True,
-            'exit_pnl': expected_pnl,
+            'position_pnl': expected_pnl,  # Position-specific from Kalshi
+            'equity_before': 1000.0,
             'exit_reason': 'TARGET (VWAP)',
             'exit_price': 66000,
             'symbol': 'BTC',
             'side': 'long'
         }
         
-        # Simulate cleanup logic
+        # Simulate cleanup logic (as in manage_positions)
         live_tickers = set()  # Position gone
         
         for ticker in list(bot.state.exit_targets.keys()):
             if ticker not in live_tickers:
                 targets = bot.state.exit_targets[ticker]
-                if targets.get('exit_pending') and targets.get('exit_pnl') is not None:
-                    bot.state.total_pnl += targets['exit_pnl']
+                if targets.get('exit_pending') and targets.get('position_pnl') is not None:
+                    bot.state.total_pnl += targets['position_pnl']
                 del bot.state.exit_targets[ticker]
         
         assert bot.state.total_pnl == initial_pnl + expected_pnl

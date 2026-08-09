@@ -1,4 +1,4 @@
-# Kalshi Perps VWAP Reversal Bot v2.7.6
+# Kalshi Perps VWAP Reversal Bot v2.7.8
 
 Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow confirmation, and multi-layer safety gates.
 
@@ -14,10 +14,12 @@ Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow
          -3σ ═══════════════════════  EXTREME OVERSOLD (long zone)
 ```
 
-**v2.7.6 Polish:**
-- Banner stop text uses `cfg.stop_beyond_wick_pct`
-- **35 tests total**: added integration tests with mocks
-- Project structure documented in README
+**v2.7.8 Realized PnL:**
+- Position-specific `unrealized_pnl` from Kalshi API (no multi-position contamination)
+- Equity delta logged as sanity check only
+- Original equity snapshot preserved on exit retry (no re-snapshot)
+- Circuit breaker triggers on actual `pnl < 0`, not reason text matching
+- `get_equity()` method returns total account value (available + positions)
 
 **v2.7.5 Polish:**
 - CONTRACT_SIZES now config-driven (`asset.contract_size`)
