@@ -1,4 +1,4 @@
-# Kalshi Perps VWAP Reversal Bot v2.7.2
+# Kalshi Perps VWAP Reversal Bot v2.7.3
 
 Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow confirmation, and multi-layer safety gates.
 
@@ -13,6 +13,11 @@ Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow
          -2σ ───────────────────────  Entry zone for longs
          -3σ ═══════════════════════  EXTREME OVERSOLD (long zone)
 ```
+
+**v2.7.3 Fixes:**
+- Exit targets kept until position confirmed gone (no more fire-and-forget)
+- Status logger uses config-driven PERP_TICKERS
+- Entry stops apply MIN_STOP_DISTANCE_PCT consistently
 
 **v2.7.2 Fixes:**
 - Fixed `state` variable shadowing in log_comprehensive_status
