@@ -1,4 +1,4 @@
-# Kalshi Perps VWAP Reversal Bot v2.0
+# Kalshi Perps VWAP Reversal Bot v2.6
 
 Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow confirmation, and multi-layer safety gates.
 
@@ -14,12 +14,24 @@ Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow
          -3σ ═══════════════════════  EXTREME OVERSOLD (long zone)
 ```
 
-**v2.0 Changes:**
+**v2.6 Changes:**
+- **Non-blocking async I/O** — All Kalshi API calls now run in thread pool, event loop no longer blocked
+- **--config flag works** — Can now specify custom config path via CLI
+- **PnL accumulation** — `total_pnl` properly updated after each exit
+- **Smarter recovery stops** — Orphaned positions use VWAP + swing-based stops instead of flat 2%
+
+**v2.5 Changes:**
+- Modular split (`indicators.py`, `kalshi_client.py`, `kalshi_async.py`)
+- Unit tests for indicators, config, and gates
+- Async client with rate limiting (under-used until v2.6)
+
+**v2.0-2.3 Changes:**
 - Single VWAP target (no TP1/TP2 split) — reduces fee friction
-- 5 safety gates before entry — prevents bad trades
+- 6 safety gates before entry — prevents bad trades
 - `post_only` orders — guaranteed maker fees (0.01%)
-- ADX trend filter — no fading strong trends
+- ADX trend filter with hysteresis — no fading strong trends
 - Spread corridor killswitch — halts on cross-venue divergence
+- Dry-run by default — requires `--execute` for live trading
 
 ## Entry Rules
 

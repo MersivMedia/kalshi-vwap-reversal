@@ -9,7 +9,10 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-CONFIG_FILE = Path(__file__).parent.parent / 'config.json'
+DEFAULT_CONFIG_FILE = Path(__file__).parent.parent / 'config.json'
+
+# Module-level override (set via load_config(path=...))
+_config_path_override: Path = None
 
 
 @dataclass
@@ -74,12 +77,22 @@ class Config:
         return 5
 
 
-def load_config() -> Config:
-    """Load configuration from config.json."""
+def load_config(config_path: str = None) -> Config:
+    """Load configuration from config.json.
+    
+    Args:
+        config_path: Optional path to config file. If None, uses default.
+    """
+    global _config_path_override
+    
+    if config_path:
+        _config_path_override = Path(config_path)
+    
+    config_file = _config_path_override or DEFAULT_CONFIG_FILE
     config = Config()
     
-    if not CONFIG_FILE.exists():
-        print(f"[CONFIG] No config.json found, using defaults")
+    if not config_file.exists():
+        print(f"[CONFIG] No config file at {config_file}, using defaults")
         # Set default assets
         config.assets = {
             'BTC': AssetConfig('KXBTCPERP', 'BTC-USD'),
@@ -88,7 +101,7 @@ def load_config() -> Config:
         return config
     
     try:
-        with open(CONFIG_FILE, 'r') as f:
+        with open(config_file, 'r') as f:
             data = json.load(f)
         
         # Parse assets
@@ -143,7 +156,7 @@ def load_config() -> Config:
         config.max_trades_per_hour = rate_limits.get('max_trades_per_hour', 10)
         config.poll_interval_seconds = rate_limits.get('poll_interval_seconds', 0.5)
         
-        print(f"[CONFIG] Loaded from {CONFIG_FILE}")
+        print(f"[CONFIG] Loaded from {config_file}")
         print(f"[CONFIG] Assets: {list(config.assets.keys())}")
         print(f"[CONFIG] Entry band: ±{config.entry_band_sd}σ")
         print(f"[CONFIG] Risk: {config.max_risk_per_trade_pct*100:.0f}% max, {config.max_margin_pct*100:.0f}% margin")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kalshi Perps VWAP Reversal Bot v2.3
+Kalshi Perps VWAP Reversal Bot v2.6
 
 Strategy:
 - VWAP with configurable σ bands (default ±2σ)
@@ -47,7 +47,8 @@ load_dotenv(_script_dir / '.env')
 from state_manager import save_state, load_state, clear_state
 from notifier import (notify_entry, notify_exit, notify_circuit_breaker, 
                       notify_startup, notify_error)
-from config import cfg, load_config
+import config as config_module
+from config import load_config
 from kalshi_client import KalshiClient
 from indicators import VWAPState, CVDState, ADXState, Candle
 
@@ -78,6 +79,13 @@ Examples:
 args = parse_args()
 DRY_RUN = not args.execute
 VERBOSE = args.verbose
+
+# Reload config if custom path provided, otherwise use default
+if args.config:
+    cfg = load_config(args.config)
+    config_module.cfg = cfg  # Update module-level reference
+else:
+    cfg = config_module.cfg
 
 if DRY_RUN:
     print("=" * 60)
@@ -157,6 +165,18 @@ last_status_log = 0
 STATE_SAVE_INTERVAL = 60  # Save state every 60 seconds
 last_state_save = 0
 total_pnl = 0.0
+
+# ============================================================
+# ASYNC HELPERS
+# ============================================================
+
+async def run_sync(func, *args, **kwargs):
+    """Run a synchronous function in a thread pool to avoid blocking the event loop."""
+    import functools
+    return await asyncio.get_event_loop().run_in_executor(
+        None, functools.partial(func, *args, **kwargs)
+    )
+
 
 # ============================================================
 # INDICATORS - imported from indicators.py
@@ -246,7 +266,7 @@ def check_adx_hysteresis(symbol: str) -> Tuple[bool, str]:
             return (True, f"ADX ranging: {adx:.1f}")
 
 
-def calculate_obi(client, ticker: str) -> float:
+async def calculate_obi(client, ticker: str) -> float:
     """
     Calculate Order Book Imbalance (OBI) from Kalshi orderbook.
     
@@ -257,7 +277,7 @@ def calculate_obi(client, ticker: str) -> float:
     Negative OBI = more resting sell orders (supports shorts)
     """
     try:
-        ob = client.get_orderbook(ticker, depth=OBI_DEPTH_LEVELS)
+        ob = await run_sync(client.get_orderbook, ticker, OBI_DEPTH_LEVELS)
         orderbook = ob.get('orderbook', {})
         
         bids = orderbook.get('bids', [])
@@ -308,7 +328,7 @@ def check_circuit_breaker() -> Tuple[bool, str]:
     return (True, f"Circuit breaker OK ({consecutive_losses} consecutive losses)")
 
 
-def validate_entry_gates(client, symbol: str, side: str, entry_price: float, target_price: float) -> Tuple[bool, str]:
+async def validate_entry_gates(client, symbol: str, side: str, entry_price: float, target_price: float) -> Tuple[bool, str]:
     """
     Run all safety gates before allowing entry.
     Returns (can_enter, reason).
@@ -357,8 +377,8 @@ def validate_entry_gates(client, symbol: str, side: str, entry_price: float, tar
     if not adx_ok:
         return (False, adx_info)
     
-    # Gate 4: OBI Confirmation
-    obi = calculate_obi(client, ticker)
+    # Gate 4: OBI Confirmation (async)
+    obi = await calculate_obi(client, ticker)
     
     if side == 'long' and obi < OBI_MIN_THRESHOLD:
         return (False, f"OBI unsupportive for long: {obi:+.2f} < +{OBI_MIN_THRESHOLD}")
@@ -754,8 +774,8 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
     return None
 
 
-def calculate_position_size(client: KalshiClient, symbol: str, 
-                           entry_price: float, stop_loss: float) -> int:
+async def calculate_position_size(client: KalshiClient, symbol: str, 
+                                  entry_price: float, stop_loss: float) -> int:
     """
     Calculate position size with conservative margin constraints from config.
     
@@ -765,7 +785,7 @@ def calculate_position_size(client: KalshiClient, symbol: str,
     - max_leverage: Effective leverage for margin calculation
     - min_stop_distance_pct: Floor for stop distance
     """
-    balance = client.get_balance()
+    balance = await run_sync(client.get_balance)
     if balance <= 0:
         return 0
     
@@ -832,8 +852,8 @@ async def execute_entry(client: KalshiClient, signal: dict):
     log(f"  Stop: ${signal['stop_loss']:,.2f}")
     log(f"  Target (VWAP): ${signal['target_price']:,.2f}")
     
-    # === SAFETY GATES ===
-    can_enter, gate_reason = validate_entry_gates(
+    # === SAFETY GATES (async) ===
+    can_enter, gate_reason = await validate_entry_gates(
         client, 
         symbol, 
         signal['side'], 
@@ -854,8 +874,8 @@ async def execute_entry(client: KalshiClient, signal: dict):
     
     log(f"  ✅ {gate_reason}")
     
-    # Calculate size (number of contracts)
-    contracts = calculate_position_size(client, symbol, signal['entry_price'], signal['stop_loss'])
+    # Calculate size (number of contracts) - async to avoid blocking
+    contracts = await calculate_position_size(client, symbol, signal['entry_price'], signal['stop_loss'])
     if contracts <= 0:
         log("  Size too small, skipping")
         return
@@ -877,13 +897,14 @@ async def execute_entry(client: KalshiClient, signal: dict):
         })
         return
     
-    # Place order (with post_only for maker fees)
-    result = client.place_order(
+    # Place order (with post_only for maker fees) - async to avoid blocking
+    result = await run_sync(
+        client.place_order,
         ticker, 
         signal['side'], 
         contracts, 
         contract_price,
-        reduce_only=False
+        False  # reduce_only
     )
     
     # Check for post_only rejection (order would cross spread)
@@ -970,10 +991,10 @@ async def manage_pending_orders(client: KalshiClient):
         price_deviation = abs(current_price - order_spot_price) / order_spot_price
         
         if price_deviation > STALE_ORDER_PRICE_THRESHOLD:
-            # Cancel stale order
+            # Cancel stale order (async to avoid blocking)
             log(f"⚠️ STALE ORDER: {symbol} @ ${order_spot_price:,.2f} (current: ${current_price:,.2f}, {price_deviation*100:.2f}% deviation)")
             try:
-                result = client.cancel_order(pending['order_id'])
+                result = await run_sync(client.cancel_order, pending['order_id'])
                 log(f"   Cancelled order {pending['order_id'][:8]}...")
                 del pending_orders[symbol]
                 log_trade({
@@ -1068,13 +1089,33 @@ def sync_positions_on_startup(client: KalshiClient):
         
         log(f"  Found {symbol}: {side.upper()} {contracts} @ ${spot_price:,.2f}")
         
-        # Create exit targets
+        # Create exit targets using proper strategy logic
+        # Target: VWAP if available
         target = vwap_states[symbol].vwap if symbol in vwap_states else spot_price
         
-        if side == 'long':
-            stop_loss = spot_price * 0.98  # 2% below
+        # Stop: Use recent swing + buffer if we have price history, otherwise fallback
+        if symbol in price_history and len(price_history[symbol]) >= 5:
+            recent_prices = list(price_history[symbol])[-20:]
+            if side == 'long':
+                swing_low = min(p['price'] for p in recent_prices)
+                stop_loss = swing_low * (1 - STOP_LOSS_BEYOND_WICK_PCT)
+                # Ensure minimum stop distance
+                min_stop = spot_price * (1 - MIN_STOP_DISTANCE_PCT)
+                stop_loss = min(stop_loss, min_stop)
+            else:
+                swing_high = max(p['price'] for p in recent_prices)
+                stop_loss = swing_high * (1 + STOP_LOSS_BEYOND_WICK_PCT)
+                # Ensure minimum stop distance
+                min_stop = spot_price * (1 + MIN_STOP_DISTANCE_PCT)
+                stop_loss = max(stop_loss, min_stop)
+            log(f"    Using swing-based stop: ${stop_loss:,.2f}")
         else:
-            stop_loss = spot_price * 1.02  # 2% above
+            # Fallback: use minimum stop distance from config
+            if side == 'long':
+                stop_loss = spot_price * (1 - max(MIN_STOP_DISTANCE_PCT, 0.02))
+            else:
+                stop_loss = spot_price * (1 + max(MIN_STOP_DISTANCE_PCT, 0.02))
+            log(f"    Using fallback stop (no price history): ${stop_loss:,.2f}")
         
         exit_targets[ticker] = {
             'stop_loss': stop_loss,
@@ -1086,7 +1127,7 @@ def sync_positions_on_startup(client: KalshiClient):
         log(f"    Stop: ${stop_loss:,.2f} | Target: ${target:,.2f}")
 
 
-def check_order_fills(client: KalshiClient):
+async def check_order_fills(client: KalshiClient):
     """
     Check if any pending orders have filled by querying the API.
     Called periodically since we may miss WebSocket fill events.
@@ -1098,9 +1139,13 @@ def check_order_fills(client: KalshiClient):
         order_id = pending['order_id']
         
         try:
-            path = f'/trade-api/v2/margin/orders/{order_id}'
-            resp = requests.get(client.base_url + path, headers=client._headers('GET', path), timeout=10)
-            order = resp.json()
+            # Run sync HTTP in thread pool to avoid blocking
+            def _fetch_order():
+                path = f'/trade-api/v2/margin/orders/{order_id}'
+                resp = requests.get(client.base_url + path, headers=client._headers('GET', path), timeout=10)
+                return resp.json()
+            
+            order = await run_sync(_fetch_order)
             
             remaining = float(order.get('remaining_count', 0))
             filled = float(order.get('fill_count', 0))
@@ -1152,8 +1197,8 @@ async def manage_positions(client: KalshiClient):
     """
     global exit_targets
     
-    # Get LIVE positions from Kalshi
-    live_positions = client.get_positions()
+    # Get LIVE positions from Kalshi (async)
+    live_positions = await run_sync(client.get_positions)
     
     # Clean up exit_targets for positions that no longer exist
     live_tickers = {p['ticker'] for p in live_positions}
@@ -1249,14 +1294,15 @@ async def manage_positions(client: KalshiClient):
                 # Don't delete exit_targets in dry run so we can keep tracking
                 continue
             
-            # Place exit order
+            # Place exit order (async to avoid blocking)
             exit_side = 'sell' if side == 'long' else 'buy'
-            result = client.place_order(
+            result = await run_sync(
+                client.place_order,
                 ticker,
                 exit_side,
                 contracts,
                 exit_contract_price,
-                reduce_only=True
+                True  # reduce_only
             )
             
             if result.get('order') or result.get('order_id'):
@@ -1269,6 +1315,11 @@ async def manage_positions(client: KalshiClient):
                 
                 log(f"  Exit contracts: {contracts}")
                 log(f"  PnL: ${pnl:+,.2f}")
+                
+                # === ACCUMULATE TOTAL PNL ===
+                global total_pnl
+                total_pnl += pnl
+                log(f"  Total session PnL: ${total_pnl:+,.2f}")
                 
                 # === CIRCUIT BREAKER: Track consecutive losses ===
                 global consecutive_losses
@@ -1316,8 +1367,8 @@ async def manage_positions(client: KalshiClient):
 # MAIN LOOP
 # ============================================================
 
-def log_comprehensive_status(client: KalshiClient):
-    """Log comprehensive status snapshot."""
+async def log_comprehensive_status(client: KalshiClient):
+    """Log comprehensive status snapshot (async to avoid blocking event loop)."""
     global last_status_log
     
     now = time.time()
@@ -1326,12 +1377,10 @@ def log_comprehensive_status(client: KalshiClient):
     last_status_log = now
     
     try:
-        # Get balance
-        balance = client.get_balance()
-        
-        # Get prices
-        btc_bid, btc_ask = client.get_best_prices('KXBTCPERP')
-        eth_bid, eth_ask = client.get_best_prices('KXETHPERP')
+        # Run sync API calls in thread pool
+        balance = await run_sync(client.get_balance)
+        btc_bid, btc_ask = await run_sync(client.get_best_prices, 'KXBTCPERP')
+        eth_bid, eth_ask = await run_sync(client.get_best_prices, 'KXETHPERP')
         
         btc_spot = contract_to_spot_price('BTC', btc_bid)
         eth_spot = contract_to_spot_price('ETH', eth_bid)
@@ -1363,8 +1412,8 @@ def log_comprehensive_status(client: KalshiClient):
                 trend = cvd_states[symbol].get_cvd_trend()
                 cvd_info[symbol] = {'value': round(cvd, 2), 'trend': trend}
         
-        # Get LIVE positions from Kalshi
-        live_positions = client.get_positions()
+        # Get LIVE positions from Kalshi (async)
+        live_positions = await run_sync(client.get_positions)
         pos_info = {}
         for pos in live_positions:
             ticker = pos['ticker']
@@ -1442,8 +1491,8 @@ async def trading_loop(client: KalshiClient):
     
     while True:
         try:
-            # Comprehensive status logging
-            log_comprehensive_status(client)
+            # Comprehensive status logging (async)
+            await log_comprehensive_status(client)
             
             # Check for entry signals
             for symbol in PERP_TICKERS:
@@ -1455,7 +1504,7 @@ async def trading_loop(client: KalshiClient):
                         await execute_entry(client, signal)
             
             # Manage pending orders (check fills, cancel stale)
-            check_order_fills(client)
+            await check_order_fills(client)
             await manage_pending_orders(client)
             
             # Manage open positions
