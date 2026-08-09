@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kalshi Perps VWAP Reversal Bot v2.7.2
+Kalshi Perps VWAP Reversal Bot v2.7.3
 
 Strategy:
 - VWAP with configurable σ bands (default ±2σ)
@@ -749,6 +749,9 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
             recent_prices = list(state.coinbase_price_history.get(symbol, [{'price': current_price}]))[-20:]
             swing_high = max(p['price'] for p in recent_prices)
             stop_loss = swing_high * (1 + STOP_LOSS_BEYOND_WICK_PCT)
+            # Apply minimum stop distance (consistent with recovery/manage paths)
+            min_stop = current_price * (1 + MIN_STOP_DISTANCE_PCT)
+            stop_loss = max(stop_loss, min_stop)
             
             log(f"🔴 SHORT SIGNAL: {symbol}")
             log(f"   Price ${current_price:,.2f} > Upper ${upper_band:,.2f}")
@@ -773,6 +776,9 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
             recent_prices = list(state.coinbase_price_history.get(symbol, [{'price': current_price}]))[-20:]
             swing_low = min(p['price'] for p in recent_prices)
             stop_loss = swing_low * (1 - STOP_LOSS_BEYOND_WICK_PCT)
+            # Apply minimum stop distance (consistent with recovery/manage paths)
+            min_stop = current_price * (1 - MIN_STOP_DISTANCE_PCT)
+            stop_loss = min(stop_loss, min_stop)
             
             log(f"🟢 LONG SIGNAL: {symbol}")
             log(f"   Price ${current_price:,.2f} < Lower ${lower_band:,.2f}")
@@ -1281,6 +1287,16 @@ async def manage_positions(client: KalshiClient):
             log(f"[POSITION] New exit targets for {symbol} {side.upper()}: Stop ${stop_loss:,.2f}, Target ${vwap:,.2f}")
         
         targets = state.exit_targets[ticker]
+        
+        # Skip if exit already pending (waiting for position to close)
+        if targets.get('exit_pending'):
+            age = time.time() - targets.get('exit_order_time', 0)
+            if age > 60:  # If pending > 60s, position may have failed to close - retry
+                log(f"[POSITION] {symbol} exit pending > 60s, will retry")
+                targets['exit_pending'] = False
+            else:
+                continue  # Skip, exit order already sent
+        
         stop_loss = targets['stop_loss']
         target_price = targets['target_price']
         
@@ -1373,8 +1389,10 @@ async def manage_positions(client: KalshiClient):
                     consecutive_losses=state.consecutive_losses
                 )
                 
-                # Remove exit targets
-                del state.exit_targets[ticker]
+                # Mark exit as pending - don't clear targets until position confirmed gone
+                # The cleanup at top of manage_positions will remove when position disappears
+                state.exit_targets[ticker]['exit_pending'] = True
+                state.exit_targets[ticker]['exit_order_time'] = time.time()
                 
                 log_trade({
                     'type': 'exit',
@@ -1405,11 +1423,13 @@ async def log_comprehensive_status(client: KalshiClient):
     try:
         # Run sync API calls in thread pool
         balance = await run_sync(client.get_balance)
-        btc_bid, btc_ask = await run_sync(client.get_best_prices, 'KXBTCPERP')
-        eth_bid, eth_ask = await run_sync(client.get_best_prices, 'KXETHPERP')
         
-        btc_spot = contract_to_spot_price('BTC', btc_bid)
-        eth_spot = contract_to_spot_price('ETH', eth_bid)
+        # Get prices for all configured assets
+        prices = {}
+        for symbol, ticker in PERP_TICKERS.items():
+            bid, ask = await run_sync(client.get_best_prices, ticker)
+            spot = contract_to_spot_price(symbol, bid)
+            prices[symbol] = {'bid': bid, 'ask': ask, 'spot': spot}
         
         # VWAP states
         vwap_info = {}
@@ -1476,7 +1496,8 @@ async def log_comprehensive_status(client: KalshiClient):
         log("-" * 50)
         halt_status = f" | ⚠️ HALTED: {state.halt_reason}" if state.trading_halted else ""
         log(f"STATUS | Balance: ${balance:.2f} | Positions: {len(live_positions)} | Pending: {len(state.pending_orders)}{halt_status}")
-        log(f"  BTC: ${btc_spot:,.0f} | ETH: ${eth_spot:,.0f}")
+        price_str = " | ".join(f"{sym}: ${p['spot']:,.0f}" for sym, p in prices.items())
+        log(f"  {price_str}")
         
         for symbol, info in vwap_info.items():
             if info['vwap'] > 0:
@@ -1496,10 +1517,7 @@ async def log_comprehensive_status(client: KalshiClient):
         # Log to file
         log_status({
             'balance': balance,
-            'prices': {
-                'BTC': {'bid': btc_bid, 'ask': btc_ask, 'spot': btc_spot},
-                'ETH': {'bid': eth_bid, 'ask': eth_ask, 'spot': eth_spot}
-            },
+            'prices': prices,
             'vwap': vwap_info,
             'cvd': cvd_info,
             'positions': pos_info,
