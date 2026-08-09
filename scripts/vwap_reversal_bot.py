@@ -311,7 +311,7 @@ def check_circuit_breaker() -> Tuple[bool, str]:
     
     if state.consecutive_losses >= CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
         state.circuit_breaker_tripped = True
-        log(f"🚨 CIRCUIT BREAKER TRIPPED: {state.consecutive_losses} consecutive stop-losses!")
+        log(f"🚨 CIRCUIT BREAKER TRIPPED: {state.consecutive_losses} consecutive losses!")
         
         # Save to disk so watchdog knows not to restart
         from state_manager import save_circuit_breaker

@@ -108,7 +108,7 @@ def notify_circuit_breaker(consecutive_losses: int, reason: str = ""):
     msg = f"""
 🚨 <b>CIRCUIT BREAKER TRIPPED</b>
 
-⚠️ {consecutive_losses} consecutive stop-losses
+⚠️ {consecutive_losses} consecutive losses
 🛑 Trading halted until manual reset
 
 To reset:
