@@ -86,7 +86,7 @@
     },
     
     "cvd": {
-        "divergence_window_minutes": 30,
+        "divergence_window_minutes": 15,
         "reset_hours": 12,
         "strict_divergence": false,
         "min_delta_pct": 0.0
