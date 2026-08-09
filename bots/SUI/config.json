@@ -1,6 +1,5 @@
 {
     "version": "2.0.0",
-    "bot_name": "SUI-VWAP",
     
     "assets": {
         "SUI": {
@@ -35,7 +34,7 @@
         "spread_corridor_max_pct": 0.0015,
         "adx_period": 14,
         "adx_trend_threshold": 35,
-        "adx_cooldown_threshold": 30,
+        "adx_cooldown_threshold": 32,
         "obi_min_threshold": 0.20,
         "obi_depth_levels": 5,
         "circuit_breaker_consecutive_losses": 3

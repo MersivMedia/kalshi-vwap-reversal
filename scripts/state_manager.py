@@ -12,9 +12,20 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
-STATE_FILE = Path(__file__).parent.parent / 'state' / 'bot_state.json'
-CIRCUIT_BREAKER_FILE = Path(__file__).parent.parent / 'state' / 'circuit_breaker.json'
-STATE_FILE.parent.mkdir(exist_ok=True)
+# Default state paths - can be overridden with set_state_dir()
+_STATE_DIR = Path(__file__).parent.parent / 'state'
+STATE_FILE = _STATE_DIR / 'bot_state.json'
+CIRCUIT_BREAKER_FILE = _STATE_DIR / 'circuit_breaker.json'
+
+def set_state_dir(state_dir: Path):
+    """Set custom state directory (for multi-bot setups)."""
+    global STATE_FILE, CIRCUIT_BREAKER_FILE, _STATE_DIR
+    _STATE_DIR = Path(state_dir)
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_FILE = _STATE_DIR / 'bot_state.json'
+    CIRCUIT_BREAKER_FILE = _STATE_DIR / 'circuit_breaker.json'
+
+_STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 def save_state(exit_targets: Dict, trades_this_hour: int = 0, total_pnl: float = 0, 
                consecutive_losses: int = 0, circuit_breaker_tripped: bool = False):

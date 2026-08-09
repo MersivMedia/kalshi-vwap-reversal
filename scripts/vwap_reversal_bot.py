@@ -44,7 +44,7 @@ _script_dir = pathlib.Path(__file__).parent.parent
 load_dotenv(_script_dir.parent / '.env')
 load_dotenv(_script_dir / '.env')
 
-from state_manager import save_state, load_state, clear_state
+from state_manager import save_state, load_state, clear_state, set_state_dir
 from notifier import (notify_entry, notify_exit, notify_circuit_breaker, 
                       notify_startup, notify_error)
 import config as config_module
@@ -84,6 +84,10 @@ VERBOSE = args.verbose
 if args.config:
     cfg = load_config(args.config)
     config_module.cfg = cfg  # Update module-level reference
+    # Set per-bot state directory based on config location
+    config_path = Path(args.config)
+    state_dir = config_path.parent / 'state'
+    set_state_dir(state_dir)
 else:
     cfg = config_module.cfg
 
@@ -490,8 +494,8 @@ def log_data(data: dict):
 # ============================================================
 
 # Watchdog settings
-WS_HEARTBEAT_TIMEOUT = 15  # Force reconnect if no message in 15 seconds
-WS_WATCHDOG_INTERVAL = 5   # Check every 5 seconds
+WS_HEARTBEAT_TIMEOUT = 30   # Force reconnect if no message in 30 seconds
+WS_WATCHDOG_INTERVAL = 5    # Check every 5 seconds
 
 # Global reference to WebSocket tasks for watchdog to restart them
 ws_tasks = {}
@@ -1340,7 +1344,8 @@ async def manage_positions(client: KalshiClient):
                     exit_price=exit_price,
                     pnl=pnl,
                     reason=exit_reason,
-                    consecutive_losses=state.consecutive_losses
+                    consecutive_losses=state.consecutive_losses,
+                    balance=equity_after
                 )
                 
                 log_trade({
@@ -1889,7 +1894,7 @@ async def main():
         return
     
     # Send startup notification
-    notify_startup(balance)
+    notify_startup(balance, list(PERP_TICKERS.keys()))
     
     # Cancel any stale orders from previous runs
     sync_orders_on_startup(client)
@@ -1903,12 +1908,15 @@ async def main():
     ws_tasks['kalshi'] = asyncio.create_task(kalshi_websocket(), name="kalshi_ws")
     ws_tasks['coinbase'] = asyncio.create_task(coinbase_websocket(), name="coinbase_ws")
     
-    tasks = [
-        ws_tasks['kalshi'],
-        ws_tasks['coinbase'],
+    # Essential tasks that should never complete - if they do, we shut down
+    # WS tasks are managed by watchdog and can be restarted without killing the bot
+    essential_tasks = [
         asyncio.create_task(trading_loop(client), name="trading_loop"),
         asyncio.create_task(ws_watchdog(), name="ws_watchdog"),
     ]
+    
+    # All tasks for cleanup
+    all_tasks = essential_tasks + [ws_tasks['kalshi'], ws_tasks['coinbase']]
     
     # Set up signal handlers for graceful shutdown
     loop = asyncio.get_event_loop()
@@ -1916,28 +1924,32 @@ async def main():
     
     def handle_signal(sig):
         log(f"Received signal {sig.name}")
-        asyncio.create_task(shutdown(tasks, client))
+        # Gather all current tasks including any restarted WS tasks
+        current_tasks = essential_tasks + list(ws_tasks.values())
+        asyncio.create_task(shutdown(current_tasks, client))
     
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda s=sig: handle_signal(s))
     
     try:
-        # Run until any task completes (shouldn't happen normally)
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        # Only watch essential tasks - WS tasks are managed by watchdog
+        done, pending = await asyncio.wait(essential_tasks, return_when=asyncio.FIRST_COMPLETED)
         
-        # If a task finished unexpectedly, log it
+        # If an essential task finished unexpectedly, log it and shut down
         for task in done:
             if task.exception():
-                log(f"Task {task.get_name()} failed: {task.exception()}")
+                log(f"Essential task {task.get_name()} failed: {task.exception()}")
             else:
-                log(f"Task {task.get_name()} completed unexpectedly")
+                log(f"Essential task {task.get_name()} completed unexpectedly")
         
-        # Shutdown remaining tasks
-        await shutdown(list(pending), client)
+        # Shutdown remaining tasks including WS tasks
+        current_ws_tasks = list(ws_tasks.values())
+        await shutdown(list(pending) + current_ws_tasks, client)
         
     except asyncio.CancelledError:
         log("Main cancelled")
-        await shutdown(tasks, client)
+        current_ws_tasks = list(ws_tasks.values())
+        await shutdown(essential_tasks + current_ws_tasks, client)
 
 
 if __name__ == "__main__":
