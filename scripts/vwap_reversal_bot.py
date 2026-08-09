@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kalshi Perps VWAP Reversal Bot v2.7.3
+Kalshi Perps VWAP Reversal Bot v2.7.4
 
 Strategy:
 - VWAP with configurable σ bands (default ±2σ)
@@ -1223,10 +1223,59 @@ async def manage_positions(client: KalshiClient):
     live_positions = await run_sync(client.get_positions)
     
     # Clean up state.exit_targets for positions that no longer exist
+    # This is where we confirm exits and book PnL
     live_tickers = {p['ticker'] for p in live_positions}
     for ticker in list(state.exit_targets.keys()):
         if ticker not in live_tickers:
-            log(f"[POSITION] Removing stale exit target for {ticker}")
+            targets = state.exit_targets[ticker]
+            
+            # If exit was pending, now we can confirm it and book PnL
+            if targets.get('exit_pending') and targets.get('exit_pnl') is not None:
+                symbol = targets.get('symbol', ticker)
+                pnl = targets['exit_pnl']
+                exit_reason = targets.get('exit_reason', 'unknown')
+                side = targets.get('side', 'unknown')
+                exit_price = targets.get('exit_price', 0)
+                
+                log(f"[POSITION] Exit confirmed for {symbol}")
+                log(f"  PnL: ${pnl:+,.2f}")
+                
+                # === NOW book PnL ===
+                state.total_pnl += pnl
+                log(f"  Total session PnL: ${state.total_pnl:+,.2f}")
+                
+                # === NOW update circuit breaker ===
+                is_stop_loss = "STOP LOSS" in exit_reason
+                if is_stop_loss:
+                    state.consecutive_losses += 1
+                    log(f"  ⚠️ Consecutive losses: {state.consecutive_losses}/{CIRCUIT_BREAKER_CONSECUTIVE_LOSSES}")
+                else:
+                    if state.consecutive_losses > 0:
+                        log(f"  ✅ Win! Resetting consecutive loss counter (was {state.consecutive_losses})")
+                    state.consecutive_losses = 0
+                
+                # === NOW send notifications ===
+                notify_exit(
+                    symbol=symbol,
+                    side=side,
+                    exit_price=exit_price,
+                    pnl=pnl,
+                    reason=exit_reason,
+                    consecutive_losses=state.consecutive_losses
+                )
+                
+                log_trade({
+                    'type': 'exit_confirmed',
+                    'symbol': symbol,
+                    'reason': exit_reason,
+                    'exit_price': exit_price,
+                    'pnl': pnl,
+                    'consecutive_losses': state.consecutive_losses,
+                    'is_stop_loss': is_stop_loss
+                })
+            else:
+                log(f"[POSITION] Removing stale exit target for {ticker}")
+            
             del state.exit_targets[ticker]
     
     for pos in live_positions:
@@ -1351,58 +1400,31 @@ async def manage_positions(client: KalshiClient):
             )
             
             if result.get('order') or result.get('order_id'):
-                # PnL calculation
+                # Calculate PnL (but don't book yet - wait for position to close)
                 contract_size = CONTRACT_SIZES.get(symbol, 0.0001)
                 price_diff = current_price - entry_price
                 if side == 'short':
                     price_diff = -price_diff
                 pnl = price_diff * contract_size * contracts
                 
-                log(f"  Exit contracts: {contracts}")
-                log(f"  PnL: ${pnl:+,.2f}")
+                log(f"  Exit order placed for {contracts} contracts")
+                log(f"  Expected PnL: ${pnl:+,.2f} (will book when position closes)")
                 
-                # === ACCUMULATE TOTAL PNL ===
-                state.total_pnl += pnl
-                log(f"  Total session PnL: ${state.total_pnl:+,.2f}")
-                
-                # === CIRCUIT BREAKER: Track consecutive losses ===
-                is_stop_loss = "STOP LOSS" in exit_reason
-                
-                if is_stop_loss:
-                    state.consecutive_losses += 1
-                    log(f"  ⚠️ Consecutive losses: {state.consecutive_losses}/{CIRCUIT_BREAKER_CONSECUTIVE_LOSSES}")
-                    if state.consecutive_losses >= CIRCUIT_BREAKER_CONSECUTIVE_LOSSES:
-                        log(f"  🚨 CIRCUIT BREAKER will trip on next signal check!")
-                else:
-                    # Win - reset consecutive loss counter
-                    if state.consecutive_losses > 0:
-                        log(f"  ✅ Win! Resetting consecutive loss counter (was {state.consecutive_losses})")
-                    state.consecutive_losses = 0
-                
-                # Send Telegram notification
-                notify_exit(
-                    symbol=symbol,
-                    side=side,
-                    exit_price=current_price,
-                    pnl=pnl,
-                    reason=exit_reason,
-                    consecutive_losses=state.consecutive_losses
-                )
-                
-                # Mark exit as pending - don't clear targets until position confirmed gone
-                # The cleanup at top of manage_positions will remove when position disappears
+                # Store exit info on targets - will be booked when position confirmed closed
                 state.exit_targets[ticker]['exit_pending'] = True
                 state.exit_targets[ticker]['exit_order_time'] = time.time()
+                state.exit_targets[ticker]['exit_pnl'] = pnl
+                state.exit_targets[ticker]['exit_reason'] = exit_reason
+                state.exit_targets[ticker]['exit_price'] = current_price
+                state.exit_targets[ticker]['symbol'] = symbol
                 
                 log_trade({
-                    'type': 'exit',
+                    'type': 'exit_order_placed',
                     'symbol': symbol,
                     'reason': exit_reason,
                     'exit_price': current_price,
                     'contracts': contracts,
-                    'pnl': pnl,
-                    'consecutive_losses': state.consecutive_losses,
-                    'is_stop_loss': is_stop_loss
+                    'expected_pnl': pnl
                 })
             else:
                 log(f"  ❌ Exit failed: {result}")
