@@ -33,7 +33,11 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 
 from dotenv import load_dotenv
-load_dotenv('/home/clawdbot/clawd/.env')
+# Load .env from parent of script directory, or from environment
+import pathlib
+_script_dir = pathlib.Path(__file__).parent.parent
+load_dotenv(_script_dir.parent / '.env')  # Try workspace .env
+load_dotenv(_script_dir / '.env')  # Try project .env
 
 from state_manager import save_state, load_state, clear_state
 from notifier import (notify_entry, notify_exit, notify_circuit_breaker, 
@@ -112,10 +116,6 @@ MAX_RISK_PER_TRADE_PCT = 0.30  # 30% max risk (aggressive for small account)
 MAX_ACCOUNT_RISK_PCT = 0.50  # 50% max total exposure
 USE_ISOLATED_MARGIN = True
 MAX_LEVERAGE = 10
-
-# CVD Settings
-CVD_DIVERGENCE_THRESHOLD = 0.7  # CVD must diverge by 70%+ vs price
-CVD_WINDOW_SECONDS = 60  # Look back window for CVD
 
 # Rate Limiting
 POLL_INTERVAL = 0.5  # seconds
@@ -980,29 +980,18 @@ def handle_kalshi_message(data: dict):
     msg_type = data.get('type')
     
     if msg_type == 'trade':
-        # Trade execution - update CVD
+        # Trade execution - track Kalshi price for spread corridor only
+        # NOTE: VWAP/CVD/ADX are driven by Coinbase to avoid mixing venues
         ticker = data.get('msg', {}).get('ticker', '')
         symbol = next((s for s, t in PERP_TICKERS.items() if t == ticker), None)
         
         if symbol:
             trade = data.get('msg', {})
             contract_price = float(trade.get('price', 0))
-            size = float(trade.get('count', 0))
-            side = 'buy' if trade.get('taker_side') == 'yes' else 'sell'
             
             # Convert contract price to spot for spread corridor tracking
             spot_price = contract_to_spot_price(symbol, contract_price)
             kalshi_prices[symbol] = spot_price
-            
-            # Update CVD
-            if symbol not in cvd_states:
-                cvd_states[symbol] = CVDState()
-            cvd_states[symbol].add_trade(spot_price, size, side)
-            
-            # Update VWAP (candle-based)
-            if symbol not in vwap_states:
-                vwap_states[symbol] = VWAPState()
-            vwap_states[symbol].process_trade(spot_price, size, side)
     
     elif msg_type == 'ticker':
         # Price update
@@ -1183,26 +1172,17 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
     # SHORT SIGNAL: Price > VWAP + 2σ AND CVD falling/flat
     if current_price >= upper_band:
         if cvd_trend in ('falling', 'flat'):
-            # Calculate profit distance to VWAP
-            profit_distance = current_price - vwap
-            
-            # Fee check: profit must exceed fees + minimum margin
-            fee_cost = current_price * TOTAL_FEE_RATE
-            min_required = current_price * (TOTAL_FEE_RATE + MIN_PROFIT_MARGIN)
-            
-            if profit_distance < min_required:
-                log(f"⚠️ SHORT {symbol}: Skipping - profit ${profit_distance:.2f} < min ${min_required:.2f} (fees)")
-                return None
-            
-            # Find last swing high for stop
-            swing_high = max(p['price'] for p in price_history.get(symbol, [{'price': current_price}]))
+            # Find last swing high for stop (use recent window, not all history)
+            recent_prices = list(price_history.get(symbol, [{'price': current_price}]))[-20:]
+            swing_high = max(p['price'] for p in recent_prices)
             stop_loss = swing_high * (1 + STOP_LOSS_BEYOND_WICK_PCT)
             
             log(f"🔴 SHORT SIGNAL: {symbol}")
             log(f"   Price ${current_price:,.2f} > Upper ${upper_band:,.2f}")
-            log(f"   Profit to VWAP: ${profit_distance:,.2f} (fee break-even: ${fee_cost:.2f})")
+            log(f"   Target VWAP: ${vwap:,.2f} | Stop: ${stop_loss:,.2f}")
             log(f"   CVD trend: {cvd_trend}")
             
+            # Fee hurdle checked in validate_entry_gates
             return {
                 'symbol': symbol,
                 'ticker': PERP_TICKERS[symbol],
@@ -1216,26 +1196,17 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
     # LONG SIGNAL: Price < VWAP - 2σ AND CVD rising/flat
     elif current_price <= lower_band:
         if cvd_trend in ('rising', 'flat'):
-            # Calculate profit distance to VWAP
-            profit_distance = vwap - current_price
-            
-            # Fee check: profit must exceed fees + minimum margin
-            fee_cost = current_price * TOTAL_FEE_RATE
-            min_required = current_price * (TOTAL_FEE_RATE + MIN_PROFIT_MARGIN)
-            
-            if profit_distance < min_required:
-                log(f"⚠️ LONG {symbol}: Skipping - profit ${profit_distance:.2f} < min ${min_required:.2f} (fees)")
-                return None
-            
-            # Find last swing low for stop
-            swing_low = min(p['price'] for p in price_history.get(symbol, [{'price': current_price}]))
+            # Find last swing low for stop (use recent window, not all history)
+            recent_prices = list(price_history.get(symbol, [{'price': current_price}]))[-20:]
+            swing_low = min(p['price'] for p in recent_prices)
             stop_loss = swing_low * (1 - STOP_LOSS_BEYOND_WICK_PCT)
             
             log(f"🟢 LONG SIGNAL: {symbol}")
             log(f"   Price ${current_price:,.2f} < Lower ${lower_band:,.2f}")
-            log(f"   Profit to VWAP: ${profit_distance:,.2f} (fee break-even: ${fee_cost:.2f})")
+            log(f"   Target VWAP: ${vwap:,.2f} | Stop: ${stop_loss:,.2f}")
             log(f"   CVD trend: {cvd_trend}")
             
+            # Fee hurdle checked in validate_entry_gates
             return {
                 'symbol': symbol,
                 'ticker': PERP_TICKERS[symbol],
@@ -1795,9 +1766,6 @@ async def manage_positions(client: KalshiClient):
                 })
             else:
                 log(f"  ❌ Exit failed: {result}")
-            
-            if should_exit:
-                del positions[symbol]
 
 
 # ============================================================

@@ -15,9 +15,12 @@ import requests
 from typing import Optional
 from datetime import datetime
 from dotenv import load_dotenv
+import pathlib
 
-# Load environment variables
-load_dotenv('/home/clawdbot/clawd/.env')
+# Load environment variables (relative paths)
+_script_dir = pathlib.Path(__file__).parent.parent
+load_dotenv(_script_dir.parent / '.env')  # Try workspace .env
+load_dotenv(_script_dir / '.env')  # Try project .env
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
