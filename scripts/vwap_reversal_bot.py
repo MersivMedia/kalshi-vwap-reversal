@@ -1288,6 +1288,7 @@ async def manage_positions(client: KalshiClient):
         side = pos['side']
         contracts = pos['contracts']
         entry_price_contract = pos['entry_price']  # Contract price
+        kalshi_unrealized_pnl = pos['unrealized_pnl']  # Actual PnL from Kalshi
         
         # Find symbol from ticker
         symbol = None
@@ -1386,10 +1387,7 @@ async def manage_positions(client: KalshiClient):
             
             # DRY RUN: Log but don't place order
             if DRY_RUN:
-                pnl_est = (current_price - entry_price) * CONTRACT_SIZES.get(symbol, 0.0001) * contracts
-                if side == 'short':
-                    pnl_est = -pnl_est
-                log(f"  🔸 DRY RUN: Would exit with PnL ~${pnl_est:+.2f}")
+                log(f"  🔸 DRY RUN: Would exit with actual PnL ${kalshi_unrealized_pnl:+.2f} (from Kalshi)")
                 # Don't delete state.exit_targets in dry run so we can keep tracking
                 continue
             
@@ -1405,15 +1403,11 @@ async def manage_positions(client: KalshiClient):
             )
             
             if result.get('order') or result.get('order_id'):
-                # Calculate PnL (but don't book yet - wait for position to close)
-                contract_size = CONTRACT_SIZES.get(symbol, 0.0001)
-                price_diff = current_price - entry_price
-                if side == 'short':
-                    price_diff = -price_diff
-                pnl = price_diff * contract_size * contracts
+                # Use Kalshi's actual unrealized PnL (based on real entry fills)
+                pnl = kalshi_unrealized_pnl
                 
                 log(f"  Exit order placed for {contracts} contracts")
-                log(f"  Expected PnL: ${pnl:+,.2f} (will book when position closes)")
+                log(f"  Actual PnL: ${pnl:+,.2f} (from Kalshi, will book when position closes)")
                 
                 # Store exit info on targets - will be booked when position confirmed closed
                 state.exit_targets[ticker]['exit_pending'] = True
@@ -1429,7 +1423,7 @@ async def manage_positions(client: KalshiClient):
                     'reason': exit_reason,
                     'exit_price': current_price,
                     'contracts': contracts,
-                    'expected_pnl': pnl
+                    'actual_pnl': pnl  # From Kalshi unrealized_pnl
                 })
             else:
                 log(f"  ❌ Exit failed: {result}")
