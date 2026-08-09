@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-Kalshi Perps VWAP Reversal Bot
+Kalshi Perps VWAP Reversal Bot v2.3
 
 Strategy:
-- VWAP with ±1σ, ±2σ, ±3σ bands
+- VWAP with configurable σ bands (default ±2σ)
 - CVD (Cumulative Volume Delta) for order flow exhaustion
-- Entry on ±2σ/±3σ pierce with CVD divergence
-- Exit at ±1σ and VWAP
-- Isolated margin, 1-2% max risk per trade
+- Entry on band pierce with CVD divergence
+- Single VWAP target exit
+- Safety gates: Data freshness, Fee hurdle, Spread corridor, ADX, OBI, Circuit breaker
 
-Data feeds: Kalshi WebSocket (perps) + Coinbase WebSocket (spot)
+Data feeds: Coinbase WebSocket (VWAP/CVD/ADX) + Kalshi WebSocket (execution/OBI)
+
+Usage:
+    python vwap_reversal_bot.py              # Dry run (no orders)
+    python vwap_reversal_bot.py --execute    # Live trading
+    python vwap_reversal_bot.py --help       # Show help
 """
 
 import sys
@@ -19,6 +24,7 @@ import os
 import json
 import time
 import asyncio
+import argparse
 import websockets
 import base64
 import math
@@ -33,32 +39,62 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 
 from dotenv import load_dotenv
-# Load .env from parent of script directory, or from environment
 import pathlib
 _script_dir = pathlib.Path(__file__).parent.parent
-load_dotenv(_script_dir.parent / '.env')  # Try workspace .env
-load_dotenv(_script_dir / '.env')  # Try project .env
+load_dotenv(_script_dir.parent / '.env')
+load_dotenv(_script_dir / '.env')
 
 from state_manager import save_state, load_state, clear_state
 from notifier import (notify_entry, notify_exit, notify_circuit_breaker, 
                       notify_startup, notify_error)
+from config import cfg, load_config
+from kalshi_client import KalshiClient
 
 # ============================================================
-# CONFIGURATION
+# CLI ARGUMENTS
 # ============================================================
 
-API_KEY = os.getenv('KALSHI_API_KEY_ID')
-KEY_PATH = os.getenv('KALSHI_KEY_PATH', 'keys/kalshi_private.pem')
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Kalshi Perps VWAP Reversal Bot',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python vwap_reversal_bot.py              # Dry run (signals logged, no orders)
+  python vwap_reversal_bot.py --execute    # Live trading
+  python vwap_reversal_bot.py -v           # Verbose logging
+        """
+    )
+    parser.add_argument('--execute', '-x', action='store_true',
+                        help='Execute live trades (default is dry-run)')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                        help='Verbose logging')
+    parser.add_argument('--config', '-c', type=str, default=None,
+                        help='Path to config.json')
+    return parser.parse_args()
+
+# Parse args at module load
+args = parse_args()
+DRY_RUN = not args.execute
+VERBOSE = args.verbose
+
+if DRY_RUN:
+    print("=" * 60)
+    print("🔸 DRY RUN MODE - No orders will be placed")
+    print("🔸 Use --execute to enable live trading")
+    print("=" * 60)
+
+# ============================================================
+# CONFIGURATION (loaded from config.json via config.py)
+# ============================================================
 
 # WebSocket URLs
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
-COINBASE_WS_URL = "wss://advanced-trade-ws.coinbase.com"  # Advanced Trade API
+COINBASE_WS_URL = "wss://advanced-trade-ws.coinbase.com"
 
-# Perp tickers and contract sizes
-PERP_TICKERS = {
-    'BTC': 'KXBTCPERP',
-    'ETH': 'KXETHPERP',
-}
+# Build asset mappings from config
+PERP_TICKERS = {sym: asset.kalshi_ticker for sym, asset in cfg.assets.items() if asset.enabled}
+COINBASE_PRODUCTS = [asset.coinbase_symbol for asset in cfg.assets.values() if asset.enabled]
 
 CONTRACT_SIZES = {
     'BTC': 0.0001,  # 1 contract = 0.0001 BTC
@@ -73,53 +109,40 @@ def contract_to_spot_price(symbol: str, contract_price: float) -> float:
     """Convert contract price to spot price."""
     return contract_price / CONTRACT_SIZES.get(symbol, 0.0001)
 
-# VWAP Settings (Session-anchored, daily reset at 00:00 UTC)
-STD_DEV_MULTIPLIER = 2.0    # ±2σ bands for entry signals
-MIN_CANDLES_FOR_VWAP = 5    # Minimum candles before VWAP is valid
-VWAP_RESET_HOUR_UTC = 0     # Reset VWAP at midnight UTC
+# Map config values to module-level constants (for backwards compatibility)
+STD_DEV_MULTIPLIER = cfg.entry_band_sd
+MIN_CANDLES_FOR_VWAP = cfg.min_candles_for_vwap
+VWAP_RESET_HOUR_UTC = cfg.vwap_reset_hour_utc
 
-# CVD Settings
-CVD_DIVERGENCE_WINDOW_MINUTES = 30  # Look back 30 min for divergence
-CVD_RESET_HOURS = 12        # Reset CVD every 12 hours to keep numbers manageable
+CVD_DIVERGENCE_WINDOW_MINUTES = cfg.cvd_divergence_window_minutes
+CVD_RESET_HOURS = cfg.cvd_reset_hours
 
-# Entry/Exit Rules
-STOP_LOSS_BEYOND_WICK_PCT = 0.001  # 0.1% past last swing high/low
+STOP_LOSS_BEYOND_WICK_PCT = cfg.stop_beyond_wick_pct
 
-# Kalshi Perps Fee Structure
-MAKER_FEE_RATE = 0.0001   # 0.01% maker fee
-TAKER_FEE_RATE = 0.00035  # 0.035% taker fee
-# Assume maker entry + taker exit (worst case for stop loss)
-TOTAL_FEE_RATE = MAKER_FEE_RATE + TAKER_FEE_RATE  # 0.045%
-MIN_PROFIT_MARGIN = 0.001  # Require at least 0.1% net profit after fees
+MAKER_FEE_RATE = cfg.maker_fee_rate
+TAKER_FEE_RATE = cfg.taker_fee_rate
+TOTAL_FEE_RATE = cfg.total_fee_rate
+MIN_PROFIT_MARGIN = cfg.fee_hurdle_min_profit_pct
 
-# === NEW: Safety Gates ===
-# Spread Corridor: Halt if Kalshi and Coinbase diverge too much
-SPREAD_CORRIDOR_MAX_PCT = 0.0015  # 0.15% max divergence before halting
+# === Safety Gates (from config) ===
+SPREAD_CORRIDOR_MAX_PCT = cfg.spread_corridor_max_pct
+ADX_PERIOD = cfg.adx_period
+ADX_TREND_THRESHOLD = cfg.adx_trend_threshold
+ADX_COOLDOWN_THRESHOLD = cfg.adx_cooldown_threshold
+OBI_MIN_THRESHOLD = cfg.obi_min_threshold
+OBI_DEPTH_LEVELS = cfg.obi_depth_levels
+MAX_DATA_LAG_SECONDS = cfg.data_freshness_max_lag_seconds
+CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = cfg.circuit_breaker_consecutive_losses
 
-# ADX Trend Filter: Don't fade bands during strong trends
-ADX_PERIOD = 14
-ADX_TREND_THRESHOLD = 25  # ADX > 25 = trending market, skip mean reversion
-ADX_COOLDOWN_THRESHOLD = 22  # ADX must drop below 22 to re-enable after blocking
+# === Risk Management (from config) ===
+MAX_RISK_PER_TRADE_PCT = cfg.max_risk_per_trade_pct
+MAX_MARGIN_PCT = cfg.max_margin_pct
+MAX_LEVERAGE = cfg.max_leverage
+MIN_STOP_DISTANCE_PCT = cfg.min_stop_distance_pct
 
-# Order Book Imbalance (OBI): Confirm passive flow supports trade direction
-OBI_MIN_THRESHOLD = 0.20  # Require +0.20 OBI for longs, -0.20 for shorts
-OBI_DEPTH_LEVELS = 5  # Use top 5 levels of orderbook
-
-# Data Freshness: Reject signals if websocket data is stale
-MAX_DATA_LAG_SECONDS = 1.0  # Max 1 second lag before halting
-
-# Circuit Breaker: Stop trading after consecutive losses
-CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 3  # Shutdown after 3 consecutive stops
-
-# Risk Management
-MAX_RISK_PER_TRADE_PCT = 0.30  # 30% max risk (aggressive for small account)
-MAX_ACCOUNT_RISK_PCT = 0.50  # 50% max total exposure
-USE_ISOLATED_MARGIN = True
-MAX_LEVERAGE = 10
-
-# Rate Limiting
-POLL_INTERVAL = 0.5  # seconds
-MAX_TRADES_PER_HOUR = 10
+# === Rate Limiting (from config) ===
+POLL_INTERVAL = cfg.poll_interval_seconds
+MAX_TRADES_PER_HOUR = cfg.max_trades_per_hour
 
 # Logging
 LOG_DIR = Path(__file__).parent.parent / 'logs'
@@ -738,172 +761,9 @@ def log_data(data: dict):
         f.write(json.dumps({**data, 'logged_at': datetime.now().isoformat()}) + '\n')
 
 # ============================================================
-# KALSHI CLIENT (from existing bot)
+# KALSHI CLIENT - imported from kalshi_client.py
 # ============================================================
-
-class KalshiClient:
-    def __init__(self):
-        self.base_url = 'https://api.elections.kalshi.com'
-        with open(KEY_PATH, 'rb') as f:
-            self.private_key = serialization.load_pem_private_key(
-                f.read(), password=None, backend=default_backend()
-            )
-    
-    def _sign(self, ts: str, method: str, path: str) -> str:
-        msg = f"{ts}{method}{path}".encode('utf-8')
-        signature = self.private_key.sign(
-            msg,
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-            hashes.SHA256()
-        )
-        return base64.b64encode(signature).decode('utf-8')
-    
-    def _headers(self, method: str, path: str) -> dict:
-        ts = str(int(datetime.now(timezone.utc).timestamp() * 1000))
-        return {
-            'KALSHI-ACCESS-KEY': API_KEY,
-            'KALSHI-ACCESS-SIGNATURE': self._sign(ts, method, path),
-            'KALSHI-ACCESS-TIMESTAMP': ts,
-            'Content-Type': 'application/json'
-        }
-    
-    def get_balance(self) -> float:
-        """Get PERPS margin balance (not predictions balance)."""
-        import requests
-        # Perps uses /margin/balance endpoint
-        path = '/trade-api/v2/margin/balance'
-        r = requests.get(self.base_url + path, headers=self._headers('GET', path), timeout=10)
-        data = r.json()
-        
-        # Parse perps balance structure
-        # Check main subaccount (id=0) for AVAILABLE balance
-        for sub in data.get('subaccount_balances', []):
-            if sub.get('subaccount') == 0:
-                available = float(sub.get('available_balance', 0))
-                if available > 0:
-                    return available
-                # Fall back to account_equity if available is 0
-                equity = float(sub.get('account_equity', 0))
-                if equity > 0:
-                    return equity
-        
-        # Last resort: settled_funds
-        return float(data.get('settled_funds', 0))
-    
-    def place_order(self, ticker: str, side: str, count: int, price: float, 
-                    reduce_only: bool = False) -> dict:
-        """
-        Place limit order on Kalshi PERPS.
-        
-        Args:
-            ticker: Market ticker (e.g., 'KXBTCPERP')
-            side: 'long'/'buy' or 'short'/'sell'
-            count: Number of contracts (integer)
-            price: Price per contract in dollars (e.g., 6.47 for BTC at ~$64,700)
-            reduce_only: If True, only reduces existing position
-        """
-        import requests
-        import uuid
-        
-        # PERPS endpoint (not predictions)
-        path = '/trade-api/v2/margin/orders'
-        
-        # Convert side to bid/ask
-        api_side = 'bid' if side.lower() in ('long', 'buy', 'bid') else 'ask'
-        
-        # Time in force and post_only for maker fees
-        # Entry orders: GTC + post_only = maker fee (0.01%)
-        # Exit orders: IOC = may be taker (0.035%) but ensures execution
-        tif = 'immediate_or_cancel' if reduce_only else 'good_till_canceled'
-        
-        order_data = {
-            'ticker': ticker,
-            'client_order_id': str(uuid.uuid4()),
-            'side': api_side,
-            'count': str(int(count)),  # Integer string
-            'price': f'{price:.4f}',
-            'time_in_force': tif,
-            'self_trade_prevention_type': 'taker_at_cross'
-        }
-        
-        # Entry orders use post_only for guaranteed maker fees
-        if not reduce_only:
-            order_data['post_only'] = True
-        
-        if reduce_only:
-            order_data['reduce_only'] = True
-        
-        try:
-            r = requests.post(
-                self.base_url + path, 
-                headers=self._headers('POST', path), 
-                json=order_data, 
-                timeout=10
-            )
-            return r.json()
-        except Exception as e:
-            return {'error': str(e)}
-    
-    def cancel_order(self, order_id: str) -> dict:
-        """Cancel an open order by order_id."""
-        import requests
-        
-        path = f'/trade-api/v2/margin/orders/{order_id}'
-        try:
-            r = requests.delete(
-                self.base_url + path,
-                headers=self._headers('DELETE', path),
-                timeout=10
-            )
-            return r.json()
-        except Exception as e:
-            return {'error': str(e)}
-    
-    def get_positions(self) -> List[dict]:
-        """Get all open positions from Kalshi (live data)."""
-        import requests
-        
-        path = '/trade-api/v2/margin/positions'
-        try:
-            r = requests.get(self.base_url + path, headers=self._headers('GET', path), timeout=10)
-            data = r.json()
-            
-            positions = []
-            for p in data.get('positions', []):
-                pos_size = float(p.get('position', 0))
-                if pos_size != 0:
-                    positions.append({
-                        'ticker': p.get('market_ticker', ''),
-                        'size': pos_size,  # Negative = short
-                        'side': 'long' if pos_size > 0 else 'short',
-                        'contracts': abs(int(pos_size)),
-                        'entry_price': float(p.get('entry_price', 0)),
-                        'margin_used': float(p.get('margin_used', 0)),
-                        'unrealized_pnl': float(p.get('unrealized_pnl', 0))
-                    })
-            return positions
-        except Exception as e:
-            log(f"Error fetching positions: {e}")
-            return []
-    
-    def get_orderbook(self, ticker: str, depth: int = 5) -> dict:
-        """Get orderbook for a perp market."""
-        import requests
-        path = f'/trade-api/v2/margin/markets/{ticker}/orderbook?depth={depth}'
-        r = requests.get(self.base_url + path, headers=self._headers('GET', path.split('?')[0]), timeout=10)
-        return r.json()
-    
-    def get_best_prices(self, ticker: str) -> Tuple[float, float]:
-        """Get best bid and ask prices."""
-        ob = self.get_orderbook(ticker)
-        orderbook = ob.get('orderbook', {})
-        bids = orderbook.get('bids', [])
-        asks = orderbook.get('asks', [])
-        
-        best_bid = float(bids[0][0]) if bids else 0
-        best_ask = float(asks[0][0]) if asks else 0
-        
-        return (best_bid, best_ask)
+# (KalshiClient is now in a separate module with rate limiting and retries)
 
 # ============================================================
 # WEBSOCKET HANDLERS
@@ -1223,21 +1083,13 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
 def calculate_position_size(client: KalshiClient, symbol: str, 
                            entry_price: float, stop_loss: float) -> int:
     """
-    Calculate position size with CONSERVATIVE margin constraints.
+    Calculate position size with conservative margin constraints from config.
     
-    Hard caps:
-    1. Max 30% of balance used as margin
-    2. Max 10% risk per trade (loss at stop)
-    3. Assumes 5x effective leverage (conservative)
-    
-    Args:
-        client: Kalshi client
-        symbol: 'BTC' or 'ETH'
-        entry_price: Spot price at entry
-        stop_loss: Spot price for stop loss
-    
-    Returns:
-        Number of contracts (integer)
+    Uses config values for:
+    - max_risk_per_trade_pct: Max loss at stop as % of balance
+    - max_margin_pct: Max margin usage as % of balance  
+    - max_leverage: Effective leverage for margin calculation
+    - min_stop_distance_pct: Floor for stop distance
     """
     balance = client.get_balance()
     if balance <= 0:
@@ -1249,8 +1101,8 @@ def calculate_position_size(client: KalshiClient, symbol: str,
     # Stop distance in spot price
     stop_distance_spot = abs(entry_price - stop_loss)
     
-    # Minimum stop distance: 0.3% (prevents oversized positions from tight stops)
-    min_stop_distance = entry_price * 0.003
+    # Minimum stop distance from config (prevents oversized positions from tight stops)
+    min_stop_distance = entry_price * MIN_STOP_DISTANCE_PCT
     if stop_distance_spot < min_stop_distance:
         log(f"  ⚠️ Stop too tight ({stop_distance_spot:.2f}), using min {min_stop_distance:.2f}")
         stop_distance_spot = min_stop_distance
@@ -1258,15 +1110,13 @@ def calculate_position_size(client: KalshiClient, symbol: str,
     # Loss per contract at stop
     loss_per_contract = stop_distance_spot * contract_size
     
-    # CONSTRAINT 1: Max 10% risk (loss at stop)
-    max_risk = balance * 0.10  # 10% max loss
+    # CONSTRAINT 1: Max risk (loss at stop) from config
+    max_risk = balance * MAX_RISK_PER_TRADE_PCT
     contracts_from_risk = int(max_risk / loss_per_contract)
     
-    # CONSTRAINT 2: Max 30% margin usage (hard cap)
-    max_margin = balance * 0.30
-    # Assume 5x effective leverage (conservative - Kalshi often uses less)
-    effective_leverage = 5.0
-    margin_per_contract = contract_price / effective_leverage
+    # CONSTRAINT 2: Max margin usage from config
+    max_margin = balance * MAX_MARGIN_PCT
+    margin_per_contract = contract_price / MAX_LEVERAGE
     contracts_from_margin = int(max_margin / margin_per_contract)
     
     # Use the most restrictive constraint
@@ -1341,6 +1191,17 @@ async def execute_entry(client: KalshiClient, signal: dict):
     
     log(f"  Contracts: {contracts}")
     log(f"  Contract price: ${contract_price:.4f}")
+    
+    # DRY RUN: Log but don't place order
+    if DRY_RUN:
+        log(f"  🔸 DRY RUN: Would place {signal['side'].upper()} order for {contracts} contracts")
+        log_trade({
+            'type': 'dry_run_signal',
+            **signal,
+            'contracts': contracts,
+            'would_execute': True
+        })
+        return
     
     # Place order (with post_only for maker fees)
     result = client.place_order(
@@ -1704,6 +1565,15 @@ async def manage_positions(client: KalshiClient):
             
             # Convert to contract price for order
             exit_contract_price = spot_to_contract_price(symbol, current_price)
+            
+            # DRY RUN: Log but don't place order
+            if DRY_RUN:
+                pnl_est = (current_price - entry_price) * CONTRACT_SIZES.get(symbol, 0.0001) * contracts
+                if side == 'short':
+                    pnl_est = -pnl_est
+                log(f"  🔸 DRY RUN: Would exit with PnL ~${pnl_est:+.2f}")
+                # Don't delete exit_targets in dry run so we can keep tracking
+                continue
             
             # Place exit order
             exit_side = 'sell' if side == 'long' else 'buy'

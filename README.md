@@ -141,14 +141,23 @@ pip install websockets aiohttp cryptography python-dotenv
 ```bash
 cd kalshi-vwap-reversal
 
+# Dry run (default) - signals logged, no orders placed
+python scripts/vwap_reversal_bot.py
+
 # Live trading
 python scripts/vwap_reversal_bot.py --execute
+
+# Verbose logging
+python scripts/vwap_reversal_bot.py --execute --verbose
 
 # Background
 nohup python scripts/vwap_reversal_bot.py --execute > bot.log 2>&1 &
 
 # Monitor
 tail -f bot.log
+
+# Help
+python scripts/vwap_reversal_bot.py --help
 ```
 
 ## Status Output
