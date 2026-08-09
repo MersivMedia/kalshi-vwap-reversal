@@ -15,7 +15,15 @@ echo ""
 # Check processes
 echo "--- Running Processes ---"
 for ASSET in NEAR SUI DOGE; do
-    PID=$(pgrep -f "vwap_reversal_bot.py.*$ASSET/config.json" || true)
+    # Find python processes and check their cwd
+    PID=""
+    for pid in $(pgrep -f "vwap_reversal_bot.py" 2>/dev/null); do
+        cwd=$(readlink /proc/$pid/cwd 2>/dev/null || true)
+        if [[ "$cwd" == *"$ASSET"* ]]; then
+            PID=$pid
+            break
+        fi
+    done
     if [[ -n "$PID" ]]; then
         echo "✅ $ASSET: PID $PID"
     else

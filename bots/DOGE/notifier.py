@@ -74,7 +74,7 @@ def notify_entry(symbol: str, side: str, contracts: int, entry_price: float,
 
 
 def notify_exit(symbol: str, side: str, exit_price: float, pnl: float, 
-                reason: str, consecutive_losses: int = 0):
+                reason: str, consecutive_losses: int = 0, balance: float = None):
     """Notify on trade exit."""
     if not NOTIFY_EXITS:
         return
@@ -90,12 +90,14 @@ def notify_exit(symbol: str, side: str, exit_price: float, pnl: float,
     if "STOP" in reason.upper() and consecutive_losses > 0:
         loss_warning = f"\n⚠️ Consecutive losses: {consecutive_losses}/3"
     
+    balance_str = f"\n💼 Balance: <code>${balance:,.2f}</code>" if balance is not None else ""
+    
     msg = f"""
 {emoji} <b>EXIT: {side.upper()} {symbol}</b>
 
 💰 P&L: <code>{pnl_str}</code>
 📍 Exit: <code>${exit_price:,.2f}</code>
-📝 Reason: {reason}{loss_warning}
+📝 Reason: {reason}{loss_warning}{balance_str}
 """
     send_telegram(msg.strip())
 
@@ -132,13 +134,14 @@ Check logs: <code>tail -f bot.log</code>
     send_telegram(msg.strip())
 
 
-def notify_startup(balance: float):
+def notify_startup(balance: float, assets: list[str] = None):
     """Notify on bot startup."""
+    asset_str = ", ".join(assets) if assets else "None"
     msg = f"""
 🤖 <b>VWAP Bot Started</b>
 
 💰 Balance: <code>${balance:.2f}</code>
-📊 Assets: BTC, ETH
+📊 Assets: {asset_str}
 ⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
 """
     send_telegram(msg.strip())

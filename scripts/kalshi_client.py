@@ -21,6 +21,10 @@ MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0
 MAX_BACKOFF = 30.0
 
+# Rate limit tracking (global for multi-bot visibility)
+_rate_limit_hits = 0
+_last_rate_limit_time = None
+
 # API endpoints
 KALSHI_BASE_URL = 'https://api.elections.kalshi.com'
 
@@ -119,8 +123,11 @@ class KalshiClient:
                 
                 # Handle rate limiting
                 if resp.status_code == 429:
+                    global _rate_limit_hits, _last_rate_limit_time
+                    _rate_limit_hits += 1
+                    _last_rate_limit_time = datetime.now(timezone.utc).isoformat()
                     retry_after = int(resp.headers.get('Retry-After', backoff))
-                    print(f"[KALSHI] Rate limited, waiting {retry_after}s...")
+                    print(f"[KALSHI] ⚠️ RATE LIMITED (hit #{_rate_limit_hits}) on {method} {path} - waiting {retry_after}s")
                     time.sleep(retry_after)
                     backoff = min(backoff * 2, MAX_BACKOFF)
                     continue
@@ -272,3 +279,11 @@ class KalshiClient:
         """Get all open orders."""
         data = self._request('GET', '/trade-api/v2/margin/orders')
         return data.get('orders', [])
+
+
+def get_rate_limit_stats() -> dict:
+    """Get rate limit statistics for monitoring."""
+    return {
+        'hits': _rate_limit_hits,
+        'last_hit': _last_rate_limit_time
+    }

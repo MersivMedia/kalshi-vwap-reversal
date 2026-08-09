@@ -4,9 +4,9 @@
         "DOGE": {
             "kalshi_ticker": "KXDOGEPERP",
             "coinbase_symbol": "DOGE-USD",
-            "enabled": false,
+            "enabled": true,
             "size_multiplier": 1.0,
-            "contract_size": 1.0,
+            "contract_size": 100.0,
             "adx_threshold": 25
         }
     },
@@ -64,6 +64,7 @@
         "min_delta_pct": 0.0
     },
     "notes": [
-        "\u26a0\ufe0f DISABLED: contract_size unverified - DO NOT ENABLE until Kalshi multiplier confirmed"
+        "✅ contract_size verified (100.0 = 100 DOGE per contract)",
+        "⚠️ DISABLED: Not backtested - enable after historical analysis"
     ]
 }

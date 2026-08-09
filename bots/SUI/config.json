@@ -7,7 +7,7 @@
             "coinbase_symbol": "SUI-USD",
             "enabled": true,
             "size_multiplier": 1.0,
-            "contract_size": 0.1,
+            "contract_size": 10.0,
             "adx_threshold": 35
         }
     },

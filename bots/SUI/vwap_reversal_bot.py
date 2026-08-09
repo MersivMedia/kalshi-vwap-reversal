@@ -490,7 +490,7 @@ def log_data(data: dict):
 # ============================================================
 
 # Watchdog settings
-WS_HEARTBEAT_TIMEOUT = 15  # Force reconnect if no message in 15 seconds
+WS_HEARTBEAT_TIMEOUT = 300  # Force reconnect if no message in 15 seconds
 WS_WATCHDOG_INTERVAL = 5   # Check every 5 seconds
 
 # Global reference to WebSocket tasks for watchdog to restart them
