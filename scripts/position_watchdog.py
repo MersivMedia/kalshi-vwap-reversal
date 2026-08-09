@@ -34,6 +34,7 @@ load_dotenv(_script_dir / '.env')
 
 from kalshi_client import KalshiClient
 from notifier import notify_error
+from config import cfg
 
 # ============================================================
 # CONFIGURATION
@@ -47,16 +48,9 @@ BOT_HEARTBEAT_TIMEOUT = 300  # 5 minutes - if state not updated, assume bot is d
 STATE_DIR = Path(__file__).parent.parent / 'state'
 STATE_FILE = STATE_DIR / 'bot_state.json'
 
-# Contract sizes for price conversion
-CONTRACT_SIZES = {
-    'BTC': 0.0001,
-    'ETH': 0.001,
-}
-
-PERP_TICKERS = {
-    'BTC': 'KXBTCPERP',
-    'ETH': 'KXETHPERP',
-}
+# Build from config (same as main bot)
+CONTRACT_SIZES = {sym: asset.contract_size for sym, asset in cfg.assets.items() if asset.enabled}
+PERP_TICKERS = {sym: asset.kalshi_ticker for sym, asset in cfg.assets.items() if asset.enabled}
 
 
 def log(msg: str):

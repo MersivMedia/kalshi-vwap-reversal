@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kalshi Perps VWAP Reversal Bot v2.7.4
+Kalshi Perps VWAP Reversal Bot v2.7.5
 
 Strategy:
 - VWAP with configurable σ bands (default ±2σ)
@@ -110,11 +110,7 @@ if not Path(KEY_PATH).is_absolute():
 # Build asset mappings from config
 PERP_TICKERS = {sym: asset.kalshi_ticker for sym, asset in cfg.assets.items() if asset.enabled}
 COINBASE_PRODUCTS = [asset.coinbase_symbol for asset in cfg.assets.values() if asset.enabled]
-
-CONTRACT_SIZES = {
-    'BTC': 0.0001,  # 1 contract = 0.0001 BTC
-    'ETH': 0.001,   # 1 contract = 0.001 ETH
-}
+CONTRACT_SIZES = {sym: asset.contract_size for sym, asset in cfg.assets.items() if asset.enabled}
 
 def spot_to_contract_price(symbol: str, spot_price: float) -> float:
     """Convert spot price to contract price."""
@@ -641,7 +637,10 @@ def handle_coinbase_message(data: dict):
                     
                     # Update VWAP (candle-based)
                     if symbol not in state.vwap_states:
-                        state.vwap_states[symbol] = VWAPState()
+                        state.vwap_states[symbol] = VWAPState(
+                            reset_hour_utc=cfg.vwap_reset_hour_utc,
+                            min_candles=cfg.min_candles_for_vwap
+                        )
                     
                     # Track candle count before processing
                     prev_candle_count = len(state.vwap_states[symbol].candles)
@@ -650,12 +649,15 @@ def handle_coinbase_message(data: dict):
                     
                     # Update CVD
                     if symbol not in state.cvd_states:
-                        state.cvd_states[symbol] = CVDState()
+                        state.cvd_states[symbol] = CVDState(
+                            divergence_window_minutes=cfg.cvd_divergence_window_minutes,
+                            reset_hours=cfg.cvd_reset_hours
+                        )
                     state.cvd_states[symbol].add_trade(price, size, side)
                     
                     # Update ADX when a new candle completes
                     if symbol not in state.adx_states:
-                        state.adx_states[symbol] = ADXState(period=ADX_PERIOD)
+                        state.adx_states[symbol] = ADXState(period=cfg.adx_period)
                     
                     # If a candle just completed, update ADX with it
                     if new_candle_count > prev_candle_count and state.vwap_states[symbol].candles:
@@ -706,7 +708,10 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
         return None
     
     vwap_state = state.vwap_states[symbol]
-    cvd_state = state.cvd_states.get(symbol, CVDState())
+    cvd_state = state.cvd_states.get(symbol, CVDState(
+        divergence_window_minutes=cfg.cvd_divergence_window_minutes,
+        reset_hours=cfg.cvd_reset_hours
+    ))
     
     # Require valid VWAP data
     if not vwap_state.is_valid():
@@ -1666,17 +1671,23 @@ def seed_vwap_from_history():
                 log(f"  {symbol}: No candles returned")
                 continue
             
-            # Initialize VWAP state
+            # Initialize VWAP state with config values
             if symbol not in state.vwap_states:
-                state.vwap_states[symbol] = VWAPState()
+                state.vwap_states[symbol] = VWAPState(
+                    reset_hour_utc=cfg.vwap_reset_hour_utc,
+                    min_candles=cfg.min_candles_for_vwap
+                )
             
-            # Initialize CVD state
+            # Initialize CVD state with config values
             if symbol not in state.cvd_states:
-                state.cvd_states[symbol] = CVDState()
+                state.cvd_states[symbol] = CVDState(
+                    divergence_window_minutes=cfg.cvd_divergence_window_minutes,
+                    reset_hours=cfg.cvd_reset_hours
+                )
             
-            # Initialize ADX state
+            # Initialize ADX state with config values
             if symbol not in state.adx_states:
-                state.adx_states[symbol] = ADXState(period=ADX_PERIOD)
+                state.adx_states[symbol] = ADXState(period=cfg.adx_period)
             
             # Coinbase candles format: [timestamp, low, high, open, close, volume]
             # They come newest first, so reverse for chronological order
@@ -1771,7 +1782,7 @@ async def main():
     log("=" * 60)
     log(f"Assets: {list(PERP_TICKERS.keys())}")
     log(f"Entry: ±{STD_DEV_MULTIPLIER}σ bands | Session VWAP (resets 00:00 UTC)")
-    log(f"Max margin: 30% | Max risk: 10%")
+    log(f"Max margin: {cfg.max_margin_pct*100:.0f}% | Max risk: {cfg.max_risk_per_trade_pct*100:.0f}%")
     log(f"Target: VWAP | Stop: Swing ±0.1%")
     log("=" * 60)
     

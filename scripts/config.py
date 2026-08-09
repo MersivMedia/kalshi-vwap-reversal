@@ -21,6 +21,7 @@ class AssetConfig:
     coinbase_symbol: str
     enabled: bool = True
     size_multiplier: float = 1.0
+    contract_size: float = 0.0001  # 1 contract = this many units (BTC: 0.0001, ETH: 0.001)
 
 
 @dataclass
@@ -95,10 +96,10 @@ def load_config(config_path: str = None) -> Config:
     
     if not config_file.exists():
         print(f"[CONFIG] No config file at {config_file}, using defaults")
-        # Set default assets
+        # Set default assets with contract sizes
         config.assets = {
-            'BTC': AssetConfig('KXBTCPERP', 'BTC-USD'),
-            'ETH': AssetConfig('KXETHPERP', 'ETH-USD'),
+            'BTC': AssetConfig('KXBTCPERP', 'BTC-USD', contract_size=0.0001),
+            'ETH': AssetConfig('KXETHPERP', 'ETH-USD', contract_size=0.001),
         }
         return config
     
@@ -107,12 +108,15 @@ def load_config(config_path: str = None) -> Config:
             data = json.load(f)
         
         # Parse assets
+        # Default contract sizes if not in config
+        default_contract_sizes = {'BTC': 0.0001, 'ETH': 0.001}
         for symbol, asset_data in data.get('assets', {}).items():
             config.assets[symbol] = AssetConfig(
                 kalshi_ticker=asset_data.get('kalshi_ticker', f'KX{symbol}PERP'),
                 coinbase_symbol=asset_data.get('coinbase_symbol', f'{symbol}-USD'),
                 enabled=asset_data.get('enabled', True),
-                size_multiplier=asset_data.get('size_multiplier', 1.0)
+                size_multiplier=asset_data.get('size_multiplier', 1.0),
+                contract_size=asset_data.get('contract_size', default_contract_sizes.get(symbol, 0.0001))
             )
         
         # VWAP
@@ -175,8 +179,8 @@ def load_config(config_path: str = None) -> Config:
     except Exception as e:
         print(f"[CONFIG] Error loading config: {e}, using defaults")
         config.assets = {
-            'BTC': AssetConfig('KXBTCPERP', 'BTC-USD'),
-            'ETH': AssetConfig('KXETHPERP', 'ETH-USD'),
+            'BTC': AssetConfig('KXBTCPERP', 'BTC-USD', contract_size=0.0001),
+            'ETH': AssetConfig('KXETHPERP', 'ETH-USD', contract_size=0.001),
         }
         return config
 
