@@ -14,8 +14,11 @@ import json
 import requests
 from typing import Optional
 from datetime import datetime
+from dotenv import load_dotenv
 
-# Load from environment
+# Load environment variables
+load_dotenv('/home/clawdbot/clawd/.env')
+
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
