@@ -157,7 +157,7 @@ class KalshiClient:
         return {'error': 'max retries exceeded'}
     
     def get_balance(self) -> float:
-        """Get PERPS margin balance."""
+        """Get PERPS available balance (cash not in positions)."""
         data = self._request('GET', '/trade-api/v2/margin/balance')
         
         # Parse perps balance structure
@@ -169,6 +169,21 @@ class KalshiClient:
                 equity = float(sub.get('account_equity', 0))
                 if equity > 0:
                     return equity
+        
+        return float(data.get('settled_funds', 0))
+    
+    def get_equity(self) -> float:
+        """Get total account equity (available + positions value)."""
+        data = self._request('GET', '/trade-api/v2/margin/balance')
+        
+        for sub in data.get('subaccount_balances', []):
+            if sub.get('subaccount') == 0:
+                # account_equity = available_balance + margin_used + unrealized_pnl
+                equity = float(sub.get('account_equity', 0))
+                if equity > 0:
+                    return equity
+                # Fallback to available if no equity field
+                return float(sub.get('available_balance', 0))
         
         return float(data.get('settled_funds', 0))
     

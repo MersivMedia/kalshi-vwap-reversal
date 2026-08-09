@@ -1242,12 +1242,12 @@ async def manage_positions(client: KalshiClient):
                 side = targets.get('side', 'unknown')
                 exit_price = targets.get('exit_price', 0)
                 
-                # Get current balance to calculate REALIZED PnL
-                balance_after = await run_sync(client.get_balance)
+                # Get current equity to calculate REALIZED PnL
+                balance_after = await run_sync(client.get_equity)
                 pnl = balance_after - balance_before
                 
                 log(f"[POSITION] Exit confirmed for {symbol}")
-                log(f"  Balance: ${balance_before:,.2f} → ${balance_after:,.2f}")
+                log(f"  Equity: ${balance_before:,.2f} → ${balance_after:,.2f}")
                 log(f"  Realized PnL: ${pnl:+,.2f}")
                 
                 # === NOW book PnL ===
@@ -1279,8 +1279,8 @@ async def manage_positions(client: KalshiClient):
                     'symbol': symbol,
                     'reason': exit_reason,
                     'exit_price': exit_price,
-                    'balance_before': balance_before,
-                    'balance_after': balance_after,
+                    'equity_before': balance_before,
+                    'equity_after': balance_after,
                     'realized_pnl': pnl,
                     'consecutive_losses': state.consecutive_losses,
                     'is_stop_loss': is_stop_loss
@@ -1398,8 +1398,8 @@ async def manage_positions(client: KalshiClient):
                 # Don't delete state.exit_targets in dry run so we can keep tracking
                 continue
             
-            # Capture balance BEFORE exit for realized PnL calculation
-            balance_before_exit = await run_sync(client.get_balance)
+            # Capture total equity BEFORE exit for realized PnL calculation
+            balance_before_exit = await run_sync(client.get_equity)
             
             # Place exit order (async to avoid blocking)
             exit_side = 'sell' if side == 'long' else 'buy'
@@ -1414,7 +1414,7 @@ async def manage_positions(client: KalshiClient):
             
             if result.get('order') or result.get('order_id'):
                 log(f"  Exit order placed for {contracts} contracts")
-                log(f"  Balance before exit: ${balance_before_exit:,.2f} (will calc realized PnL after close)")
+                log(f"  Equity before exit: ${balance_before_exit:,.2f} (will calc realized PnL after close)")
                 
                 # Store exit info on targets - will calc realized PnL when position confirmed closed
                 state.exit_targets[ticker]['exit_pending'] = True
@@ -1430,7 +1430,7 @@ async def manage_positions(client: KalshiClient):
                     'reason': exit_reason,
                     'exit_price': current_price,
                     'contracts': contracts,
-                    'balance_before': balance_before_exit
+                    'equity_before': balance_before_exit
                 })
             else:
                 log(f"  ❌ Exit failed: {result}")
