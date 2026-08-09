@@ -19,6 +19,7 @@ Mean-reversion scalping on Kalshi perpetual futures using VWAP bands, order flow
 - All indicator constructors use cfg values
 - Startup banner uses cfg values
 - config.json includes `cvd` section
+- **24 new tests**: exits, signals, CVD logic, circuit breaker
 
 **v2.7.4 Fixes:**
 - PnL/circuit-breaker now booked only when position confirmed closed (prevents double-count on retry)
@@ -283,6 +284,27 @@ sudo systemctl start vwap-watchdog
 ```
 
 Run both `vwap-bot` and `vwap-watchdog` for redundant exit protection.
+
+## Tests
+
+```bash
+# Run all tests
+python tests/test_indicators.py
+python tests/test_config.py
+python tests/test_gates.py
+python tests/test_exits.py
+python tests/test_signals.py
+
+# Or with pytest (if installed)
+python -m pytest tests/ -v
+```
+
+Test coverage:
+- **Indicators**: VWAP, CVD, ADX calculations
+- **Config**: Loading, defaults, asset parsing
+- **Gates**: Data freshness, spread corridor, ADX hysteresis
+- **Exits**: BotState, exit confirmation, PnL booking, circuit breaker
+- **Signals**: CVD logic, strict mode, min delta, stop distance
 
 ## License
 
