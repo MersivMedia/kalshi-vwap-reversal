@@ -26,6 +26,12 @@ for ASSET in NEAR SUI DOGE; do
         continue
     fi
     
+    # Skip disabled assets
+    ENABLED=$(python3 -c "import json; cfg=json.load(open('$CONFIG')); print('true' if list(cfg['assets'].values())[0].get('enabled', False) else 'false')" 2>/dev/null)
+    if [[ "$ENABLED" != "true" ]]; then
+        continue
+    fi
+    
     mkdir -p "$LOG_DIR"
     
     PID=$(pgrep -f "vwap_reversal_bot.py.*$ASSET/config.json" || true)

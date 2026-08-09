@@ -1,33 +1,32 @@
 {
     "version": "2.0.0",
-    
     "assets": {
         "DOGE": {
             "kalshi_ticker": "KXDOGEPERP",
             "coinbase_symbol": "DOGE-USD",
-            "enabled": true,
+            "enabled": false,
             "size_multiplier": 1.0,
             "contract_size": 1.0,
             "adx_threshold": 25
         }
     },
-    
     "vwap": {
         "reset_hour_utc": 0,
-        "sd_bands": [1, 2, 3],
+        "sd_bands": [
+            1,
+            2,
+            3
+        ],
         "entry_band": 2.0
     },
-    
     "entry": {
         "min_deviation_sd": 2.0,
         "require_cvd_divergence": true
     },
-    
     "exit": {
         "target": "vwap",
         "stop_beyond_wick_pct": 0.001
     },
-    
     "safety_gates": {
         "data_freshness_max_lag_seconds": 1.0,
         "fee_hurdle_min_profit_pct": 0.001,
@@ -35,43 +34,36 @@
         "adx_period": 14,
         "adx_trend_threshold": 25,
         "adx_cooldown_threshold": 22,
-        "obi_min_threshold": 0.20,
+        "obi_min_threshold": 0.2,
         "obi_depth_levels": 5,
         "circuit_breaker_consecutive_losses": 3
     },
-    
     "fees": {
         "maker_rate": 0.0001,
         "taker_rate": 0.00035
     },
-    
     "risk": {
-        "max_risk_per_trade_pct": 0.20,
-        "max_margin_pct": 0.30,
+        "max_risk_per_trade_pct": 0.2,
+        "max_margin_pct": 0.3,
         "use_isolated_margin": true,
         "max_leverage": 5,
         "min_stop_distance_pct": 0.003
     },
-    
     "orders": {
         "post_only_entries": true,
         "time_in_force": "good_till_canceled"
     },
-    
     "rate_limits": {
         "max_trades_per_hour": 10,
         "poll_interval_seconds": 0.5
     },
-    
     "cvd": {
         "divergence_window_minutes": 30,
         "reset_hours": 12,
         "strict_divergence": false,
         "min_delta_pct": 0.0
     },
-    
     "notes": [
-        "⚠️ DOGE not backtested - using conservative default settings",
-        "contract_size TBD - using 1.0 as placeholder"
+        "\u26a0\ufe0f DISABLED: contract_size unverified - DO NOT ENABLE until Kalshi multiplier confirmed"
     ]
 }

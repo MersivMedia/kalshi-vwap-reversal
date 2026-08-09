@@ -36,14 +36,22 @@ for ASSET in NEAR SUI DOGE; do
     
     mkdir -p "$LOG_DIR"
     
-    if [[ -f "$CONFIG" ]]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting $ASSET bot..."
-        cd "$SCRIPT_DIR/$ASSET"
-        nohup python3 "$BOT_SCRIPT" --config "$CONFIG" $EXECUTE_FLAG >> "$LOG" 2>&1 &
-        echo "  PID: $! -> $LOG"
-    else
+    if [[ ! -f "$CONFIG" ]]; then
         echo "  ⚠️  Config not found: $CONFIG"
+        continue
     fi
+    
+    # Check if asset is enabled
+    ENABLED=$(python3 -c "import json; cfg=json.load(open('$CONFIG')); print('true' if list(cfg['assets'].values())[0].get('enabled', False) else 'false')" 2>/dev/null)
+    if [[ "$ENABLED" != "true" ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Skipping $ASSET (disabled in config)"
+        continue
+    fi
+    
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting $ASSET bot..."
+    cd "$SCRIPT_DIR/$ASSET"
+    nohup python3 "$BOT_SCRIPT" --config "$CONFIG" $EXECUTE_FLAG >> "$LOG" 2>&1 &
+    echo "  PID: $! -> $LOG"
 done
 
 sleep 3
