@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kalshi Perps VWAP Reversal Bot v2.7.1
+Kalshi Perps VWAP Reversal Bot v2.7.2
 
 Strategy:
 - VWAP with configurable σ bands (default ±2σ)
@@ -726,7 +726,7 @@ def check_entry_signal(symbol: str, current_price: float) -> Optional[dict]:
     if cfg.cvd_min_delta_pct > 0:
         # Get CVD change over window
         cvd_now = cvd_state.running_cvd
-        cvd_start, _ = cvd_state.get_cvd_at(cfg.cvd_divergence_window_minutes)
+        cvd_start, _ = cvd_state.get_cvd_at_time(cfg.cvd_divergence_window_minutes)
         cvd_change = abs(cvd_now - cvd_start)
         cvd_base = max(abs(cvd_now), abs(cvd_start), 1.0)  # Avoid div by zero
         cvd_delta_pct = cvd_change / cvd_base
@@ -1383,7 +1383,7 @@ async def manage_positions(client: KalshiClient):
                     'exit_price': current_price,
                     'contracts': contracts,
                     'pnl': pnl,
-                    'state.consecutive_losses': state.consecutive_losses,
+                    'consecutive_losses': state.consecutive_losses,
                     'is_stop_loss': is_stop_loss
                 })
             else:
@@ -1415,10 +1415,10 @@ async def log_comprehensive_status(client: KalshiClient):
         vwap_info = {}
         for symbol in PERP_TICKERS:
             if symbol in state.vwap_states:
-                state = state.vwap_states[symbol]
-                lower, vwap, upper = state.get_bands(STD_DEV_MULTIPLIER)
-                current = state.current_price
-                dev, direction = state.get_deviation(current)
+                vwap_s = state.vwap_states[symbol]
+                lower, vwap, upper = vwap_s.get_bands(STD_DEV_MULTIPLIER)
+                current = vwap_s.current_price
+                dev, direction = vwap_s.get_deviation(current)
                 
                 vwap_info[symbol] = {
                     'vwap': round(vwap, 2),
@@ -1427,7 +1427,7 @@ async def log_comprehensive_status(client: KalshiClient):
                     'current_price': round(current, 2),
                     'deviation_sd': round(dev, 2),
                     'direction': direction,
-                    'candle_count': state.candle_count
+                    'candle_count': vwap_s.candle_count
                 }
         
         # CVD states
@@ -1503,8 +1503,8 @@ async def log_comprehensive_status(client: KalshiClient):
             'vwap': vwap_info,
             'cvd': cvd_info,
             'positions': pos_info,
-            'state.ws_connected': state.ws_connected.copy(),
-            'state.trades_this_hour': state.trades_this_hour
+            'ws_connected': state.ws_connected.copy(),
+            'trades_this_hour': state.trades_this_hour
         })
         
     except Exception as e:
@@ -1598,9 +1598,11 @@ def seed_vwap_from_history():
     
     log("Seeding VWAP from Coinbase candles...")
     
+    # Build symbol -> product mapping from config
     coinbase_products = {
-        'BTC': 'BTC-USD',
-        'ETH': 'ETH-USD'
+        sym: asset.coinbase_symbol 
+        for sym, asset in cfg.assets.items() 
+        if asset.enabled
     }
     
     for symbol, product_id in coinbase_products.items():
