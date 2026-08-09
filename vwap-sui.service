@@ -1,0 +1,16 @@
+[Unit]
+Description=VWAP Reversal Bot - SUI
+After=network.target
+
+[Service]
+Type=simple
+User=clawdbot
+WorkingDirectory=/home/clawdbot/clawd/projects/kalshi-vwap-reversal/bots/SUI
+Environment="KALSHI_API_KEY_ID=137d4160-a91f-4000-b28e-01d369b498e7"
+Environment="KALSHI_KEY_PATH=/home/clawdbot/clawd/keys/kalshi_private.pem"
+ExecStart=/usr/bin/python3 vwap_reversal_bot.py --execute --config config.json
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
