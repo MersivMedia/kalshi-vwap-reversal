@@ -1179,6 +1179,11 @@ def sync_positions_on_startup(client: KalshiClient):
         # Convert contract price to spot
         spot_price = contract_to_spot_price(symbol, entry_price_contract)
         
+        # Validate entry price - can't calculate stops without it
+        if spot_price <= 0 or entry_price_contract <= 0:
+            log(f"  ⚠️ {symbol}: Invalid entry price ({entry_price_contract}), cannot set stop")
+            continue
+        
         # Check if we already have valid exit targets (stop must be non-zero)
         if ticker in state.exit_targets:
             existing_stop = state.exit_targets[ticker].get('stop_loss', 0)
