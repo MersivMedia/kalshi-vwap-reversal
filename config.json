@@ -71,7 +71,7 @@
         "max_risk_per_trade_pct": 0.20,
         "max_margin_pct": 0.30,
         "use_isolated_margin": true,
-        "max_leverage": 5,
+        "max_leverage": 3,
         "min_stop_distance_pct": 0.003
     },
     
