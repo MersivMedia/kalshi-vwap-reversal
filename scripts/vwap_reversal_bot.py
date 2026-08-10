@@ -1325,11 +1325,12 @@ async def manage_positions(client: KalshiClient):
                 equity_after = await run_sync(client.get_equity)
                 equity_delta = equity_after - equity_before
                 
-                # Use position-specific PnL (avoids contamination from other positions)
-                pnl = position_pnl
+                # Use equity delta for PnL (more accurate than stale position_pnl)
+                # Single-asset bots mean equity_delta = this position's PnL
+                pnl = equity_delta
                 
                 log(f"[POSITION] Exit confirmed for {symbol}")
-                log(f"  Realized PnL: ${pnl:+,.2f} (position-specific)")
+                log(f"  Realized PnL: ${pnl:+,.2f} (equity Δ, position_pnl was ${position_pnl:+,.2f})")
                 log(f"  Equity check: ${equity_before:,.2f} → ${equity_after:,.2f} (Δ${equity_delta:+,.2f})")
                 
                 # === NOW book PnL ===
@@ -1474,8 +1475,20 @@ async def manage_positions(client: KalshiClient):
         if should_exit:
             log(f"EXIT: {symbol} - {exit_reason}")
             
-            # Convert to contract price for order
-            exit_contract_price = spot_to_contract_price(symbol, current_price)
+            # For IOC exits, we need to cross the spread to fill
+            # SHORT exit = BUY = hit the ASK
+            # LONG exit = SELL = hit the BID
+            try:
+                best_bid, best_ask = await run_sync(client.get_best_prices, ticker)
+                if side == 'short':  # Exit buy needs to hit the ask
+                    exit_contract_price = best_ask * 1.001  # 0.1% buffer above ask
+                    log(f"  Exit price: crossing ask @ ${best_ask:.4f} (placing ${exit_contract_price:.4f})")
+                else:  # Exit sell needs to hit the bid
+                    exit_contract_price = best_bid * 0.999  # 0.1% buffer below bid
+                    log(f"  Exit price: crossing bid @ ${best_bid:.4f} (placing ${exit_contract_price:.4f})")
+            except Exception as e:
+                log(f"  Warning: Could not get orderbook, using current price: {e}")
+                exit_contract_price = spot_to_contract_price(symbol, current_price)
             
             # DRY RUN: Log but don't place order
             if DRY_RUN:
