@@ -1490,6 +1490,7 @@ async def manage_positions(client: KalshiClient):
                 state.exit_targets[ticker]['position_pnl'] = kalshi_unrealized_pnl  # Position-specific
             
             # Place exit order (async to avoid blocking)
+            # post_only=False so exits fill immediately (taker is fine for exits)
             exit_side = 'sell' if side == 'long' else 'buy'
             result = await run_sync(
                 client.place_order,
@@ -1497,7 +1498,8 @@ async def manage_positions(client: KalshiClient):
                 exit_side,
                 contracts,
                 exit_contract_price,
-                True  # reduce_only
+                True,  # reduce_only
+                False  # post_only - must be False for exits to fill
             )
             
             if result.get('order') or result.get('order_id'):
