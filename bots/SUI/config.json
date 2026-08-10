@@ -29,7 +29,7 @@
     },
     
     "safety_gates": {
-        "data_freshness_max_lag_seconds": 1.0,
+        "data_freshness_max_lag_seconds": 5.0,
         "fee_hurdle_min_profit_pct": 0.001,
         "spread_corridor_max_pct": 0.0015,
         "adx_period": 14,
