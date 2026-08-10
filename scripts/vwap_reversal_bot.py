@@ -1179,10 +1179,14 @@ def sync_positions_on_startup(client: KalshiClient):
         # Convert contract price to spot
         spot_price = contract_to_spot_price(symbol, entry_price_contract)
         
-        # Check if we already have exit targets
+        # Check if we already have valid exit targets (stop must be non-zero)
         if ticker in state.exit_targets:
-            log(f"  {symbol}: Already tracking exit targets")
-            continue
+            existing_stop = state.exit_targets[ticker].get('stop_loss', 0)
+            if existing_stop > 0:
+                log(f"  {symbol}: Already tracking exit targets (stop=${existing_stop:,.4f})")
+                continue
+            else:
+                log(f"  {symbol}: Invalid stop ($0), recalculating...")
         
         log(f"  Found {symbol}: {side.upper()} {contracts} @ ${spot_price:,.2f}")
         
