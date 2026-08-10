@@ -207,8 +207,10 @@ class KalshiClient:
                     'size': pos_size,
                     'contracts': abs(int(pos_size)),
                     'side': 'long' if pos_size > 0 else 'short',
-                    'entry_price': float(p.get('average_entry_price', 0)),
-                    'unrealized_pnl': float(p.get('unrealized_pnl', 0))
+                    'entry_price': float(p.get('entry_price', 0)),
+                    'unrealized_pnl': float(p.get('unrealized_pnl', 0)),
+                    'margin_used': float(p.get('margin_used', 0)),
+                    'fees': float(p.get('fees', 0))
                 })
         
         return positions
